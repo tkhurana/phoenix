@@ -33,6 +33,8 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Logger;
 
 import static org.apache.hadoop.hbase.HColumnDescriptor.BLOOMFILTER;
@@ -202,7 +204,78 @@ public class SchemaExtractionTool extends Configured implements Tool {
     }
 
     private String getColumnInfoString(PTable table, ConnectionQueryServices cqsi) {
-        return "( )";
+        StringBuilder colInfo = new StringBuilder();
+        colInfo.append('(');
+        List<PColumn> columns = table.getColumns();
+        List<PColumn> pkColumns = table.getPKColumns();
+        ArrayList<String> colDefs = new ArrayList<>(columns.size());
+        for (PColumn col : columns) {
+            String def = extractColumn(col);
+            if (pkColumns.size() == 1 && pkColumns.contains(col)) {
+                def += " PRIMARY KEY" + extractPKColumnAttributes(col);
+            }
+            colDefs.add(def);
+        }
+        colInfo.append(StringUtils.join(colDefs, ", "));
+
+        if (pkColumns.size() > 1) {
+            // multi column primary key
+            String pkConstraint = String.format(" CONSTRAINT %s PRIMARY KEY (%s)",
+                    table.getPKName().getString(), extractPKConstraint(pkColumns));
+            colInfo.append(pkConstraint);
+        }
+        colInfo.append(')');
+        return colInfo.toString();
+    }
+
+    private String extractColumn(PColumn column) {
+        String colName = column.getName().getString();
+        String type = column.getDataType().getSqlTypeName();
+        StringBuilder buf = new StringBuilder(colName);
+        buf.append(' ');
+        buf.append(type);
+        Integer maxLength = column.getMaxLength();
+        if (maxLength != null) {
+            buf.append('(');
+            buf.append(maxLength);
+            Integer scale = column.getScale();
+            if (scale != null) {
+                buf.append(',');
+                buf.append(scale); // has both max length and scale. For ex- decimal(10,2)
+            }
+            buf.append(')');
+        }
+
+        if (!column.isNullable()) {
+            buf.append(' ');
+            buf.append("NOT NULL");
+        }
+
+        return buf.toString();
+    }
+
+    private String extractPKColumnAttributes(PColumn column) {
+        StringBuilder buf = new StringBuilder();
+
+        if (column.getSortOrder() != SortOrder.getDefault()) {
+            buf.append(' ');
+            buf.append(column.getSortOrder().toString());
+        }
+
+        if (column.isRowTimestamp()) {
+            buf.append(' ');
+            buf.append("ROW_TIMESTAMP");
+        }
+
+        return buf.toString();
+    }
+
+    private String extractPKConstraint(List<PColumn> pkColumns) {
+        ArrayList<String> colDefs = new ArrayList<>(pkColumns.size());
+        for (PColumn pkCol : pkColumns) {
+            colDefs.add(pkCol.getName().getString() + extractPKColumnAttributes(pkCol));
+        }
+        return StringUtils.join(colDefs, ",");
     }
 
     private void populateToolAttributes(String[] args) {
