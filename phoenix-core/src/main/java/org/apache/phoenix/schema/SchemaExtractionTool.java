@@ -1,5 +1,6 @@
 package org.apache.phoenix.schema;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.HelpFormatter;
@@ -8,10 +9,20 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.cli.PosixParser;
 import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.phoenix.mapreduce.util.ConnectionUtil;
+import org.apache.phoenix.query.QueryServices;
+import org.apache.phoenix.query.QueryServicesOptions;
+import org.apache.phoenix.util.PhoenixRuntime;
+import org.apache.phoenix.util.SchemaUtil;
 
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.logging.Logger;
 
 public class SchemaExtractionTool extends Configured implements Tool {
@@ -25,27 +36,72 @@ public class SchemaExtractionTool extends Configured implements Tool {
             "[Optional] Schema name ex. schema");
     private String pTableName;
     private String pSchemaName;
-    private String outputString = "CREATE TABLE %s";
+    private String outputString = "CREATE TABLE ";
 
     @Override
     public int run(String[] args) throws Exception {
+        String columnInfoString="", propertiesString="";
         populateToolAttributes(args);
-        decorateWithColumnInfo();
-        decorateWithPTableProperties();
-        decorateWithHTableProperties();
+
+        PTable table = getPTable();
+        if (table !=null) {
+            columnInfoString = decorateWithColumnInfo(table);
+            propertiesString = decorateWithPTableProperties(table);
+            propertiesString = decorateWithHTableProperties(table, propertiesString);
+        }
+        System.out.println(outputString+columnInfoString+propertiesString);
         return 0;
     }
 
-    private void decorateWithHTableProperties() {
+    private PTable getPTable() throws SQLException {
+        Configuration conf = HBaseConfiguration.addHbaseResources(getConf());
+
+        try (Connection conn = getConnection(conf)) {
+            String pTableFullName = SchemaUtil.getQualifiedTableName(pSchemaName, pTableName);
+            return PhoenixRuntime.getTable(conn, pTableFullName);
+        }
+    }
+
+    @VisibleForTesting
+    public static Connection getConnection(Configuration conf) throws SQLException {
+        // in case we want to query sys cat
+        setRpcRetriesAndTimeouts(conf);
+        return ConnectionUtil.getInputConnection(conf);
+    }
+
+    private static void setRpcRetriesAndTimeouts(Configuration conf) {
+        long indexRebuildQueryTimeoutMs =
+                conf.getLong(QueryServices.INDEX_REBUILD_QUERY_TIMEOUT_ATTRIB,
+                        QueryServicesOptions.DEFAULT_INDEX_REBUILD_QUERY_TIMEOUT);
+        long indexRebuildRPCTimeoutMs =
+                conf.getLong(QueryServices.INDEX_REBUILD_RPC_TIMEOUT_ATTRIB,
+                        QueryServicesOptions.DEFAULT_INDEX_REBUILD_RPC_TIMEOUT);
+        long indexRebuildClientScannerTimeOutMs =
+                conf.getLong(QueryServices.INDEX_REBUILD_CLIENT_SCANNER_TIMEOUT_ATTRIB,
+                        QueryServicesOptions.DEFAULT_INDEX_REBUILD_CLIENT_SCANNER_TIMEOUT);
+        int indexRebuildRpcRetriesCounter =
+                conf.getInt(QueryServices.INDEX_REBUILD_RPC_RETRIES_COUNTER,
+                        QueryServicesOptions.DEFAULT_INDEX_REBUILD_RPC_RETRIES_COUNTER);
+
+        // Set phoenix and hbase level timeouts and rpc retries
+        conf.setLong(QueryServices.THREAD_TIMEOUT_MS_ATTRIB, indexRebuildQueryTimeoutMs);
+        conf.setLong(HConstants.HBASE_RPC_TIMEOUT_KEY, indexRebuildRPCTimeoutMs);
+        conf.setLong(HConstants.HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD,
+                indexRebuildClientScannerTimeOutMs);
+        conf.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, indexRebuildRpcRetriesCounter);
+    }
+
+    private String decorateWithHTableProperties(PTable table, String propertiesString) {
+        return null;
 
     }
 
-    private void decorateWithPTableProperties() {
-
+    private String decorateWithPTableProperties(PTable table) {
+        return null;
     }
 
-    private void decorateWithColumnInfo() {
-
+    private String decorateWithColumnInfo(PTable table) {
+        return null;
     }
 
     private void populateToolAttributes(String[] args) {
