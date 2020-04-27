@@ -1,0 +1,53 @@
+package org.apache.phoenix.end2end;
+
+import org.apache.phoenix.jdbc.PhoenixConnection;
+import org.apache.phoenix.query.BaseTest;
+import org.apache.phoenix.schema.SchemaExtractionTool;
+import org.apache.phoenix.util.PropertiesUtil;
+import org.apache.phoenix.util.ReadOnlyProps;
+import org.apache.phoenix.util.SchemaUtil;
+import org.junit.Assert;
+import org.junit.BeforeClass;
+import org.junit.Test;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.util.Collections;
+
+import java.util.Map;
+import java.util.Properties;
+
+import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
+
+public class SchemaExtractionToolIT extends BaseTest {
+
+    @BeforeClass
+    public static void setup() throws Exception {
+        Map<String, String> props = Collections.emptyMap();
+        setUpTestDriver(new ReadOnlyProps(props.entrySet().iterator()));
+    }
+
+    @Test
+    public void testTableProperties() throws Exception {
+        String tableName = generateUniqueName();
+        String schemaName = generateUniqueName();
+        Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
+        String properties = "TTL=2592000,IMMUTABLE_ROWS=true,DISABLE_MIGRATION=true,DISABLE_TABLE_SOR=true,DISABLE_WAL=true";
+
+        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+
+            String pTableFullName = SchemaUtil.getQualifiedTableName(schemaName, tableName);
+            conn.createStatement().execute("CREATE TABLE "+pTableFullName + "(k VARCHAR NOT NULL PRIMARY KEY, v1 VARCHAR, v2 VARCHAR)"
+                    + properties);
+            conn.commit();
+            String [] args = {"-tb", tableName, "-s", schemaName};
+
+            SchemaExtractionTool set = new SchemaExtractionTool();
+            set.setConf(conn.unwrap(PhoenixConnection.class).getQueryServices().getConfiguration());
+            set.run(args);
+            String actualProperties = set.output.substring(set.output.lastIndexOf(")")+1);
+            Assert.assertEquals(5, actualProperties.split(",").length);
+            Assert.assertEquals(properties, actualProperties);
+        }
+    }
+}

@@ -18,6 +18,7 @@
 package org.apache.phoenix.schema;
 
 import java.util.List;
+import java.util.Map;
 
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.phoenix.hbase.index.util.KeyValueBuilder;
@@ -350,4 +351,8 @@ public class DelegateTable implements PTable {
     @Override public boolean hasViewModifiedViewTTL() {
         return delegate.hasViewModifiedViewTTL();
     }
+
+    @Override public Map<String, String> getValues() { return delegate.getValues(); }
+
+    @Override public Map<String, String> getDefaultValues() { return delegate.getDefaultValues(); }
 }

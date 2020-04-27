@@ -1,6 +1,5 @@
 package org.apache.phoenix.schema;
 
-import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.HelpFormatter;
@@ -12,18 +11,35 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.mapreduce.util.ConnectionUtil;
+import org.apache.phoenix.query.ConnectionQueryServices;
+import org.apache.phoenix.query.ConnectionQueryServicesImpl;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.SchemaUtil;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.logging.Logger;
+
+import static org.apache.hadoop.hbase.HColumnDescriptor.BLOOMFILTER;
+import static org.apache.hadoop.hbase.HColumnDescriptor.COMPRESSION;
+import static org.apache.hadoop.hbase.HColumnDescriptor.DATA_BLOCK_ENCODING;
+import static org.apache.hadoop.hbase.HTableDescriptor.IS_META;
+import static org.apache.phoenix.util.SchemaUtil.DEFAULT_DATA_BLOCK_ENCODING;
 
 public class SchemaExtractionTool extends Configured implements Tool {
 
@@ -36,25 +52,114 @@ public class SchemaExtractionTool extends Configured implements Tool {
             "[Optional] Schema name ex. schema");
     private String pTableName;
     private String pSchemaName;
-    private String outputString = "CREATE TABLE ";
+    private static final String CREATE_TABLE = "CREATE TABLE ";
+    Configuration conf;
+    Map<String, String> defaultProps = new HashMap<>();
+    Map<String, String> definedProps = new HashMap<>();
+    public String output;
 
     @Override
     public int run(String[] args) throws Exception {
-        String columnInfoString="", propertiesString="";
         populateToolAttributes(args);
-
         PTable table = getPTable();
-        if (table !=null) {
-            columnInfoString = decorateWithColumnInfo(table);
-            propertiesString = decorateWithPTableProperties(table);
-            propertiesString = decorateWithHTableProperties(table, propertiesString);
-        }
-        System.out.println(outputString+columnInfoString+propertiesString);
+        ConnectionQueryServicesImpl cqsi = (ConnectionQueryServicesImpl) getCQSIObject();
+
+        populateDefaultProperties(table, cqsi);
+
+        String columnInfoString = getColumnInfoString(table, cqsi);
+
+        setPTableProperties(table);
+        HTableDescriptor htd = getHTableDescriptor(cqsi, table);
+
+        setHTableProperties(table, htd);
+
+        HColumnDescriptor hcd = htd.getFamily(SchemaUtil.getEmptyColumnFamily(table));
+        setHColumnFamilyProperties(table, hcd);
+
+        String propertiesString = convertPropertiesToString();
+
+        output = generateOutputString(columnInfoString, propertiesString);
         return 0;
     }
 
+    private String generateOutputString(String columnInfoString, String propertiesString) {
+        StringBuilder outputBuilder = new StringBuilder(CREATE_TABLE);
+        outputBuilder.append(columnInfoString).append(propertiesString);
+        return outputBuilder.toString();
+    }
+
+    private void populateDefaultProperties(PTable table, ConnectionQueryServicesImpl cqsi)
+            throws SQLException, IOException {
+        HTableDescriptor htd = cqsi.getAdmin().getTableDescriptor(
+                TableName.valueOf(table.getPhysicalName().getString()));
+        HColumnDescriptor columnDescriptor = htd.getFamily(SchemaUtil.getEmptyColumnFamily(table));
+        Map<String, String> propsMap = columnDescriptor.getDefaultValues();
+        for (String key : propsMap.keySet()) {
+            if(key.equalsIgnoreCase(BLOOMFILTER) || key.equalsIgnoreCase(COMPRESSION)) {
+                defaultProps.put(key, "NONE");
+                continue;
+            }
+            if(key.equalsIgnoreCase(DATA_BLOCK_ENCODING)) {
+                defaultProps.put(key, String.valueOf(DEFAULT_DATA_BLOCK_ENCODING));
+                continue;
+            }
+            defaultProps.put(key, propsMap.get(key));
+        }
+        defaultProps.putAll(table.getDefaultValues());
+    }
+
+    private void setHTableProperties(PTable table, HTableDescriptor htd) {
+        Map<ImmutableBytesWritable, ImmutableBytesWritable> propsMap = htd.getValues();
+        for (ImmutableBytesWritable entry : propsMap.keySet()) {
+            if(Bytes.toString(entry.get()).contains("coprocessor") || Bytes.toString(entry.get()).contains(IS_META)) {
+                continue;
+            }
+            defaultProps.put(Bytes.toString(entry.get()), "false");
+            definedProps.put(Bytes.toString(entry.get()), Bytes.toString(propsMap.get(entry).get()));
+        }
+    }
+
+    private void setHColumnFamilyProperties(PTable table, HColumnDescriptor columnDescriptor) {
+        Map<ImmutableBytesWritable, ImmutableBytesWritable> propsMap = columnDescriptor.getValues();
+        for (ImmutableBytesWritable entry : propsMap.keySet()) {
+            definedProps.put(Bytes.toString(entry.get()), Bytes.toString(propsMap.get(entry).get()));
+        }
+    }
+
+    private void setPTableProperties(PTable table) {
+        //MULTI_TENANT/IMMUTABLE_ROWS/COLUMN_ENCODED_BYTES/TRANSACTION_PROVIDER/SALT_BUCKETS/DATA_BLOCK_ENCODING/DISABLE_WAL
+        //UPDATE_CACHE_FREQUENCY/AUTO_PARTITION_SEQ/GUIDE_POSTS_WIDTH/IMMUTABLE_STORAGE_SCHEME/USE_STATS_FOR_PARALLELIZATION
+        Map <String, String> map = table.getValues();
+        for(String key : map.keySet()) {
+            if(map.get(key) != null) {
+                definedProps.put(key, map.get(key));
+            }
+        }
+    }
+
+    private HTableDescriptor getHTableDescriptor(ConnectionQueryServicesImpl cqsi, PTable table)
+            throws SQLException, IOException {
+        return cqsi.getAdmin().getTableDescriptor(
+                TableName.valueOf(table.getPhysicalName().getString()));
+    }
+
+    private String convertPropertiesToString() {
+        StringBuilder optionBuilder = new StringBuilder();
+
+        for(String key : definedProps.keySet()) {
+
+            if(definedProps.get(key)!=null && defaultProps.get(key) != null && !definedProps.get(key).equals(defaultProps.get(key))) {
+                if (!(optionBuilder.length() == 0)) {
+                    optionBuilder.append(",");
+                }
+                optionBuilder.append(key+"="+definedProps.get(key));
+            }
+        }
+        return optionBuilder.toString();
+    }
+
     private PTable getPTable() throws SQLException {
-        Configuration conf = HBaseConfiguration.addHbaseResources(getConf());
+        conf = HBaseConfiguration.addHbaseResources(getConf());
 
         try (Connection conn = getConnection(conf)) {
             String pTableFullName = SchemaUtil.getQualifiedTableName(pSchemaName, pTableName);
@@ -62,7 +167,12 @@ public class SchemaExtractionTool extends Configured implements Tool {
         }
     }
 
-    @VisibleForTesting
+    private ConnectionQueryServices getCQSIObject() throws SQLException {
+        try(Connection conn = getConnection(conf)) {
+            return conn.unwrap(PhoenixConnection.class).getQueryServices();
+        }
+    }
+
     public static Connection getConnection(Configuration conf) throws SQLException {
         // in case we want to query sys cat
         setRpcRetriesAndTimeouts(conf);
@@ -91,24 +201,15 @@ public class SchemaExtractionTool extends Configured implements Tool {
         conf.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, indexRebuildRpcRetriesCounter);
     }
 
-    private String decorateWithHTableProperties(PTable table, String propertiesString) {
-        return null;
-
-    }
-
-    private String decorateWithPTableProperties(PTable table) {
-        return null;
-    }
-
-    private String decorateWithColumnInfo(PTable table) {
-        return null;
+    private String getColumnInfoString(PTable table, ConnectionQueryServices cqsi) {
+        return "( )";
     }
 
     private void populateToolAttributes(String[] args) {
         try {
             CommandLine cmdLine = parseOptions(args);
-            pTableName = cmdLine.getOptionValue(TABLE_OPTION.getValue());
-            pSchemaName = cmdLine.getOptionValue(SCHEMA_OPTION.getValue());
+            pTableName = cmdLine.getOptionValue(TABLE_OPTION.getOpt());
+            pSchemaName = cmdLine.getOptionValue(SCHEMA_OPTION.getOpt());
             LOGGER.info("Schema Extraction Tool initiated: " + StringUtils.join( args, ","));
         } catch (IllegalStateException e) {
             printHelpAndExit(e.getMessage(), getOptions());
@@ -129,7 +230,7 @@ public class SchemaExtractionTool extends Configured implements Tool {
             printHelpAndExit(options, 0);
         }
         if (!(cmdLine.hasOption(TABLE_OPTION.getOpt()))) {
-            throw new IllegalStateException("Table name should be passed"
+            throw new IllegalStateException("Table name should be passed "
                     +TABLE_OPTION.getLongOpt());
         }
         return cmdLine;
