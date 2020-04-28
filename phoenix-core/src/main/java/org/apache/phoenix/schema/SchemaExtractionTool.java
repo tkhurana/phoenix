@@ -53,8 +53,12 @@ public class SchemaExtractionTool extends Configured implements Tool {
             "[Required] Table name ex. table1");
     private static final Option SCHEMA_OPTION = new Option("s", "schema", true,
             "[Optional] Schema name ex. schema");
+    private static final Option SHOW_TREE_OPTION = new Option("st", "show-tree", false,
+            "[Optional] Show schema hierarchy tree");
+
     private String pTableName;
     private String pSchemaName;
+    private boolean showTree;
     private static final String CREATE_TABLE = "CREATE TABLE %s";
     private static final String CREATE_INDEX = "CREATE %sINDEX %s ON %s";
     Configuration conf;
@@ -67,20 +71,41 @@ public class SchemaExtractionTool extends Configured implements Tool {
         populateToolAttributes(args);
         conf = HBaseConfiguration.addHbaseResources(getConf());
         PTable table = getPTable(pSchemaName, pTableName);
-        ConnectionQueryServicesImpl cqsi = (ConnectionQueryServicesImpl) getCQSIObject();
-        HTableDescriptor htd = getHTableDescriptor(cqsi, table);
-        HColumnDescriptor hcd = htd.getFamily(SchemaUtil.getEmptyColumnFamily(table));
-        if(table.getType().equals(PTableType.TABLE)) {
-            output = extractCreateTableDDL(table, htd, hcd);
-        } else if(table.getType().equals(PTableType.INDEX)) {
-            output = extractCreateIndexDDL(table);
-        } else if(table.getType().equals(PTableType.VIEW)) {
-            output = extractCreateViewDDL(table, htd, hcd);
+
+        if (!showTree) {
+            output = getDDL(table);
+        } else {
+            output = getSchemaTree(table);
         }
         return 0;
     }
 
-    private String extractCreateIndexDDL(PTable indexPTable)
+    private String getDDL(PTable table) throws Exception {
+        String ddl = null;
+        if(table.getType().equals(PTableType.TABLE)) {
+            ddl = extractCreateTableDDL(table);
+        } else if(table.getType().equals(PTableType.INDEX)) {
+            ddl = extractCreateIndexDDL(table);
+        } else if(table.getType().equals(PTableType.VIEW)) {
+            ddl = extractCreateViewDDL(table);
+        }
+        return ddl;
+    }
+
+    private String getSchemaTree(PTable table) throws Exception {
+        SchemaTreeNode node = null;
+        if(table.getType().equals(PTableType.TABLE)) {
+            node = new TableSchemaTreeNode(table, this);
+        } else if(table.getType().equals(PTableType.INDEX)) {
+            node = new IndexSchemaTreeNode(table, this);
+        } else if(table.getType().equals(PTableType.VIEW)) {
+
+        }
+        node.visit();
+        return node.toJSON().toString(2);
+    }
+
+    protected String extractCreateIndexDDL(PTable indexPTable)
             throws SQLException {
         String baseTableName = indexPTable.getParentTableName().getString();
         String baseTableFullName = SchemaUtil.getQualifiedTableName(indexPTable.getSchemaName().getString(), baseTableName);
@@ -147,7 +172,7 @@ public class SchemaExtractionTool extends Configured implements Tool {
         return coveredColumnsBuilder.toString();
     }
 
-    private String generateIndexDDLString(String baseTableFullName, String indexedColumnString, String coveredColumnString, boolean local) {
+    protected String generateIndexDDLString(String baseTableFullName, String indexedColumnString, String coveredColumnString, boolean local) {
         StringBuilder outputBuilder = new StringBuilder(String.format(CREATE_INDEX, local ? "LOCAL " : "", pTableName, baseTableFullName));
         outputBuilder.append("(");
         outputBuilder.append(indexedColumnString);
@@ -166,11 +191,14 @@ public class SchemaExtractionTool extends Configured implements Tool {
         }
     }
 
-    private String extractCreateViewDDL(PTable table, HTableDescriptor htd, HColumnDescriptor hcd) {
+    protected String extractCreateViewDDL(PTable table) {
         return "";
     }
 
-    private String extractCreateTableDDL(PTable table, HTableDescriptor htd, HColumnDescriptor hcd) {
+    protected String extractCreateTableDDL(PTable table) throws Exception {
+        ConnectionQueryServicesImpl cqsi = (ConnectionQueryServicesImpl) getCQSIObject();
+        HTableDescriptor htd = getHTableDescriptor(cqsi, table);
+        HColumnDescriptor hcd = htd.getFamily(SchemaUtil.getEmptyColumnFamily(table));
         populateDefaultProperties(table);
         setPTableProperties(table);
         setHTableProperties(htd);
@@ -379,6 +407,7 @@ public class SchemaExtractionTool extends Configured implements Tool {
             CommandLine cmdLine = parseOptions(args);
             pTableName = cmdLine.getOptionValue(TABLE_OPTION.getOpt());
             pSchemaName = cmdLine.getOptionValue(SCHEMA_OPTION.getOpt());
+            showTree = cmdLine.hasOption(SHOW_TREE_OPTION.getOpt());
             LOGGER.info("Schema Extraction Tool initiated: " + StringUtils.join( args, ","));
         } catch (IllegalStateException e) {
             printHelpAndExit(e.getMessage(), getOptions());
@@ -410,6 +439,8 @@ public class SchemaExtractionTool extends Configured implements Tool {
         options.addOption(TABLE_OPTION);
         SCHEMA_OPTION.setOptionalArg(true);
         options.addOption(SCHEMA_OPTION);
+        options.addOption(SHOW_TREE_OPTION);
+        SHOW_TREE_OPTION.setOptionalArg(true);
         return options;
     }
 
