@@ -77,6 +77,10 @@ public class SchemaExtractionToolIT extends BaseTest {
             set.run(args);
             System.out.println(set.output);
             Assert.assertEquals(createIndexStatement.toUpperCase(), set.output.toUpperCase());
+
+            String [] args2 = {"-tb", tableName, "-s", schemaName, "--show-tree"};
+            set.run(args2);
+            System.out.println(set.output);
         }
     }
 
@@ -91,11 +95,11 @@ public class SchemaExtractionToolIT extends BaseTest {
         try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
 
             String pTableFullName = SchemaUtil.getQualifiedTableName(schemaName, tableName);
-            conn.createStatement().execute("CREATE TABLE "+pTableFullName + "(k VARCHAR NOT NULL PRIMARY KEY, v1 VARCHAR, v2 VARCHAR)"
+            conn.createStatement().execute("CREATE TABLE "+pTableFullName + "(k BIGINT NOT NULL PRIMARY KEY, v1 VARCHAR, v2 VARCHAR)"
                     + properties);
             String viewFullName = SchemaUtil.getQualifiedTableName(schemaName, viewName);
 
-            String createView = "CREATE VIEW "+viewFullName + "(id1 BIGINT, id2 BIGINT, id3 VARCHAR ) AS SELECT * FROM "+pTableFullName;
+            String createView = "CREATE VIEW "+viewFullName + "(id1 BIGINT, id2 BIGINT NOT NULL, id3 VARCHAR NOT NULL CONSTRAINT PKVIEW PRIMARY KEY (id2, id3 DESC)) AS SELECT * FROM "+pTableFullName;
 
             conn.createStatement().execute(createView);
             conn.commit();

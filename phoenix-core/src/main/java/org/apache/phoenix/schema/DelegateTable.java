@@ -139,8 +139,11 @@ public class DelegateTable implements PTable {
     }
 
     @Override
-    public List<PTable> getIndexes() {
-        return delegate.getIndexes();
+    public List<PTable> getIndexes() { return delegate.getIndexes(); }
+
+    @Override
+    public List<PTable> getViews() {
+        return delegate.getViews();
     }
 
     @Override

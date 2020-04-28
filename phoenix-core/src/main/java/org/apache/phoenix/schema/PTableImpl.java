@@ -166,6 +166,7 @@ public class PTableImpl implements PTable {
     // Indexes associated with this table.
     private final List<PTable> indexes;
     // Data table name that the index is created on.
+    private final List<PTable> views;
     private final PName parentName;
     private final PName parentSchemaName;
     private final PName parentTableName;
@@ -222,6 +223,7 @@ public class PTableImpl implements PTable {
         private Integer bucketNum;
         private RowKeySchema rowKeySchema;
         private List<PTable> indexes;
+        private List<PTable> views;
         private PName parentName;
         private PName parentSchemaName;
         private PName parentTableName;
@@ -382,6 +384,11 @@ public class PTableImpl implements PTable {
 
         public Builder setIndexes(List<PTable> indexes) {
             this.indexes = indexes;
+            return this;
+        }
+
+        public Builder setViews(List<PTable> views) {
+            this.views = views;
             return this;
         }
 
@@ -851,6 +858,7 @@ public class PTableImpl implements PTable {
         this.viewTTLHighWaterMark = builder.viewTTLHighWaterMark;
         this.viewModifiedPropSet = builder.viewModifiedPropSet;
         this.values = builder.values;
+        this.views = builder.views;
     }
 
     // When cloning table, ignore the salt column as it will be added back in the constructor
@@ -1516,6 +1524,11 @@ public class PTableImpl implements PTable {
     @Override
     public List<PTable> getIndexes() {
         return indexes;
+    }
+
+    @Override
+    public List<PTable> getViews() {
+        return views;
     }
 
     @Override
