@@ -29,15 +29,15 @@ import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.SchemaUtil;
 
+import java.io.FileWriter;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Map;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.logging.Logger;
 
@@ -56,12 +56,13 @@ public class SchemaExtractionTool extends Configured implements Tool {
             "[Required] Table name ex. table1");
     private static final Option SCHEMA_OPTION = new Option("s", "schema", true,
             "[Optional] Schema name ex. schema");
-    private static final Option SHOW_TREE_OPTION = new Option("st", "show-tree", false,
-            "[Optional] Show schema hierarchy tree");
+    private static final Option TREE_FILE_OPTION = new Option("tf", "tree-file", true,
+            "[Optional] Generate schema hierarchy tree and write to file in json");
 
     private String pTableName;
     private String pSchemaName;
-    private boolean showTree;
+    private String treeFile;
+
     private static final String CREATE_TABLE = "CREATE TABLE %s";
     private static final String CREATE_INDEX = "CREATE %sINDEX %s ON %s";
     private static final String CREATE_VIEW = "CREATE VIEW %s%s AS SELECT * FROM %s%s";
@@ -75,10 +76,19 @@ public class SchemaExtractionTool extends Configured implements Tool {
         populateToolAttributes(args);
         conf = HBaseConfiguration.addHbaseResources(getConf());
         PTable table = getPTable(pSchemaName, pTableName);
-        if (!showTree) {
+        if (treeFile == null) {
             output = getDDL(table);
         } else {
             output = getSchemaTree(table);
+            // Write JSON file
+            try (FileWriter file = new FileWriter(treeFile)) {
+                file.write(output);
+                file.flush();
+            } catch (IOException e) {
+                LOGGER.info(String.format("Error writing schema tree to file: %s cause: %s",
+                        treeFile, e.getMessage()));
+                e.printStackTrace();
+            }
         }
         return 0;
     }
@@ -442,7 +452,7 @@ public class SchemaExtractionTool extends Configured implements Tool {
             CommandLine cmdLine = parseOptions(args);
             pTableName = cmdLine.getOptionValue(TABLE_OPTION.getOpt());
             pSchemaName = cmdLine.getOptionValue(SCHEMA_OPTION.getOpt());
-            showTree = cmdLine.hasOption(SHOW_TREE_OPTION.getOpt());
+            treeFile = cmdLine.getOptionValue(TREE_FILE_OPTION.getOpt());
             LOGGER.info("Schema Extraction Tool initiated: " + StringUtils.join( args, ","));
         } catch (IllegalStateException e) {
             printHelpAndExit(e.getMessage(), getOptions());
@@ -474,8 +484,8 @@ public class SchemaExtractionTool extends Configured implements Tool {
         options.addOption(TABLE_OPTION);
         SCHEMA_OPTION.setOptionalArg(true);
         options.addOption(SCHEMA_OPTION);
-        options.addOption(SHOW_TREE_OPTION);
-        SHOW_TREE_OPTION.setOptionalArg(true);
+        options.addOption(TREE_FILE_OPTION);
+        TREE_FILE_OPTION.setOptionalArg(true);
         return options;
     }
 
