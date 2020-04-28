@@ -55,8 +55,9 @@ public class SchemaExtractionTool extends Configured implements Tool {
             "[Optional] Schema name ex. schema");
     private String pTableName;
     private String pSchemaName;
-    private static final String CREATE_TABLE = "CREATE TABLE %s";
+    private static final String CREATE_TABLE = "CREATE TABLE %s ";
     private static final String CREATE_INDEX = "CREATE %sINDEX %s ON %s";
+    private static final String CREATE_VIEW = "CREATE VIEW %s%s AS SELECT * FROM %s %s";
     Configuration conf;
     Map<String, String> defaultProps = new HashMap<>();
     Map<String, String> definedProps = new HashMap<>();
@@ -67,15 +68,13 @@ public class SchemaExtractionTool extends Configured implements Tool {
         populateToolAttributes(args);
         conf = HBaseConfiguration.addHbaseResources(getConf());
         PTable table = getPTable(pSchemaName, pTableName);
-        ConnectionQueryServicesImpl cqsi = (ConnectionQueryServicesImpl) getCQSIObject();
-        HTableDescriptor htd = getHTableDescriptor(cqsi, table);
-        HColumnDescriptor hcd = htd.getFamily(SchemaUtil.getEmptyColumnFamily(table));
+
         if(table.getType().equals(PTableType.TABLE)) {
-            output = extractCreateTableDDL(table, htd, hcd);
+            output = extractCreateTableDDL(table);
         } else if(table.getType().equals(PTableType.INDEX)) {
             output = extractCreateIndexDDL(table);
         } else if(table.getType().equals(PTableType.VIEW)) {
-            output = extractCreateViewDDL(table, htd, hcd);
+            output = extractCreateViewDDL(table);
         }
         return 0;
     }
@@ -83,23 +82,20 @@ public class SchemaExtractionTool extends Configured implements Tool {
     private String extractCreateIndexDDL(PTable indexPTable)
             throws SQLException {
         String baseTableName = indexPTable.getParentTableName().getString();
-        String baseTableFullName = SchemaUtil.getQualifiedTableName(indexPTable.getSchemaName().getString(), baseTableName);
+        String baseTableFullName = SchemaUtil.getQualifiedTableName(pSchemaName, baseTableName);
         PTable dataPTable = getPTable(baseTableFullName);
-        IndexMaintainer im;
-        try (Connection conn = getConnection(conf)) {
-            im = indexPTable.getIndexMaintainer(dataPTable, conn.unwrap(PhoenixConnection.class));
-        }
+
         String defaultCF = SchemaUtil.getEmptyColumnFamilyAsString(indexPTable);
         String indexedColumnsString = getIndexedColumnsString(indexPTable, dataPTable, defaultCF);
         String coveredColumnsString = getCoveredColumnsString(indexPTable, defaultCF);
 
 
         return generateIndexDDLString(baseTableFullName, indexedColumnsString, coveredColumnsString,
-                im.isLocalIndex());
+                indexPTable.getIndexType().equals(PTable.IndexType.LOCAL));
     }
 
     //TODO: Indexed on an expression
-    // test with different default CF, key is a included
+    // test with different default CF, key is a included column
     private String getIndexedColumnsString(PTable indexPTable, PTable dataPTable, String defaultCF) {
 
         List<PColumn> indexPK = indexPTable.getPKColumns();
@@ -166,11 +162,32 @@ public class SchemaExtractionTool extends Configured implements Tool {
         }
     }
 
-    private String extractCreateViewDDL(PTable table, HTableDescriptor htd, HColumnDescriptor hcd) {
-        return "";
+    private String extractCreateViewDDL(PTable table) throws SQLException {
+        String baseTableName = table.getParentTableName().getString();
+        String baseTableFullName = SchemaUtil.getQualifiedTableName(pSchemaName, baseTableName);
+        PTable baseTable = getPTable(baseTableFullName);
+
+        String columnInfoString = getColumnInfoString(table);
+        String baseColumnInfoString = getColumnInfoString(baseTable);
+
+        String whereClause = table.getViewStatement();
+        if(whereClause != null) {
+            whereClause = whereClause.substring(whereClause.indexOf("WHERE"));
+        }
+        return generateCreateViewDDL(columnInfoString.equalsIgnoreCase(baseColumnInfoString) ? "" : columnInfoString, baseTableFullName, whereClause == null ? "" : whereClause);
     }
 
-    private String extractCreateTableDDL(PTable table, HTableDescriptor htd, HColumnDescriptor hcd) {
+    private String generateCreateViewDDL(String columnInfoString, String baseTableFullName, String whereClause) {
+        String viewFullName = SchemaUtil.getQualifiedTableName(pSchemaName, pTableName);
+        StringBuilder outputBuilder = new StringBuilder(String.format(CREATE_VIEW, viewFullName, columnInfoString, baseTableFullName, whereClause));
+        return outputBuilder.toString();
+    }
+
+    private String extractCreateTableDDL(PTable table) throws IOException, SQLException {
+        ConnectionQueryServicesImpl cqsi = (ConnectionQueryServicesImpl) getCQSIObject();
+        HTableDescriptor htd = getHTableDescriptor(cqsi, table);
+        HColumnDescriptor hcd = htd.getFamily(SchemaUtil.getEmptyColumnFamily(table));
+
         populateDefaultProperties(table);
         setPTableProperties(table);
         setHTableProperties(htd);
