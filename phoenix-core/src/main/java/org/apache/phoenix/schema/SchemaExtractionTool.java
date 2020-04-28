@@ -45,6 +45,7 @@ import static org.apache.hadoop.hbase.HColumnDescriptor.BLOOMFILTER;
 import static org.apache.hadoop.hbase.HColumnDescriptor.COMPRESSION;
 import static org.apache.hadoop.hbase.HColumnDescriptor.DATA_BLOCK_ENCODING;
 import static org.apache.hadoop.hbase.HTableDescriptor.IS_META;
+import static org.apache.phoenix.util.MetaDataUtil.VIEW_INDEX_ID_COLUMN_NAME;
 import static org.apache.phoenix.util.SchemaUtil.DEFAULT_DATA_BLOCK_ENCODING;
 
 public class SchemaExtractionTool extends Configured implements Tool {
@@ -129,20 +130,32 @@ public class SchemaExtractionTool extends Configured implements Tool {
 
         List<PColumn> indexPK = indexPTable.getPKColumns();
         List<PColumn> dataPK = dataPTable.getPKColumns();
+        Set<String> indexPkSet = new HashSet<>();
+        Set<String> dataPkSet = new HashSet<>();
+        Map<String, SortOrder> sortOrderMap = new HashMap<>();
         StringBuilder indexedColumnsBuilder = new StringBuilder();
         for (PColumn indexedColumn : indexPK) {
             String indexColumn = extractIndexColumn(indexedColumn.getName().getString(), defaultCF);
-            for(PColumn pColumn : dataPK) {
-                if(!pColumn.getName().getString().equalsIgnoreCase(indexColumn)) {
-                    if(indexedColumnsBuilder.length()!=0) {
-                        indexedColumnsBuilder.append(", ");
-                    }
-                    indexedColumnsBuilder.append(indexColumn);
-                    if(indexedColumn.getSortOrder()!= SortOrder.getDefault()) {
-                        indexedColumnsBuilder.append(" ");
-                        indexedColumnsBuilder.append(indexedColumn.getSortOrder());
-                    }
-                }
+            if(indexColumn.equalsIgnoreCase(VIEW_INDEX_ID_COLUMN_NAME)) {
+                continue;
+            }
+            indexPkSet.add(indexColumn);
+            sortOrderMap.put(indexColumn, indexedColumn.getSortOrder());
+        }
+
+        for(PColumn pColumn : dataPK) {
+            dataPkSet.add(pColumn.getName().getString());
+        }
+
+        Set<String> effectivePK = Sets.symmetricDifference(indexPkSet, dataPkSet);
+        for (String column : effectivePK) {
+            if(indexedColumnsBuilder.length()!=0) {
+                indexedColumnsBuilder.append(", ");
+            }
+            indexedColumnsBuilder.append(column);
+            if(sortOrderMap.get(column)!= SortOrder.getDefault()) {
+                indexedColumnsBuilder.append(" ");
+                indexedColumnsBuilder.append(sortOrderMap.get(column));
             }
         }
         return indexedColumnsBuilder.toString();

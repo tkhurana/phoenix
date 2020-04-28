@@ -131,7 +131,7 @@ public class SchemaExtractionToolIT extends BaseTest {
 
             String createView = "CREATE VIEW "+viewFullName + "(id1 BIGINT, id2 BIGINT NOT NULL, id3 VARCHAR NOT NULL CONSTRAINT PKVIEW PRIMARY KEY (id2, id3 DESC)) AS SELECT * FROM "+pTableFullName;
 
-            String createIndexStatement = "CREATE INDEX "+indexName + " ON "+viewFullName+"(id3 DESC, id1) INCLUDE (v1)";
+            String createIndexStatement = "CREATE INDEX "+indexName + " ON "+viewFullName+"(id1) INCLUDE (v1)";
 
             conn.createStatement().execute(createView);
             conn.createStatement().execute(createIndexStatement);
