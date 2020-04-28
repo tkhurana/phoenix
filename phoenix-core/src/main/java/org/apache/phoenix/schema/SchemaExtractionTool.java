@@ -19,6 +19,7 @@ import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.phoenix.index.IndexMaintainer;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.mapreduce.util.ConnectionUtil;
 import org.apache.phoenix.query.ConnectionQueryServices;
@@ -54,7 +55,8 @@ public class SchemaExtractionTool extends Configured implements Tool {
             "[Optional] Schema name ex. schema");
     private String pTableName;
     private String pSchemaName;
-    private static final String CREATE_TABLE = "CREATE TABLE ";
+    private static final String CREATE_TABLE = "CREATE TABLE %s";
+    private static final String CREATE_INDEX = "CREATE %sINDEX %s ON %s";
     Configuration conf;
     Map<String, String> defaultProps = new HashMap<>();
     Map<String, String> definedProps = new HashMap<>();
@@ -63,78 +65,175 @@ public class SchemaExtractionTool extends Configured implements Tool {
     @Override
     public int run(String[] args) throws Exception {
         populateToolAttributes(args);
-        PTable table = getPTable();
+        conf = HBaseConfiguration.addHbaseResources(getConf());
+        PTable table = getPTable(pSchemaName, pTableName);
         ConnectionQueryServicesImpl cqsi = (ConnectionQueryServicesImpl) getCQSIObject();
-
-        populateDefaultProperties(table, cqsi);
-
-        String columnInfoString = getColumnInfoString(table, cqsi);
-
-        setPTableProperties(table);
         HTableDescriptor htd = getHTableDescriptor(cqsi, table);
-
-        setHTableProperties(table, htd);
-
         HColumnDescriptor hcd = htd.getFamily(SchemaUtil.getEmptyColumnFamily(table));
-        setHColumnFamilyProperties(table, hcd);
-
-        String propertiesString = convertPropertiesToString();
-
-        output = generateOutputString(columnInfoString, propertiesString);
+        if(table.getType().equals(PTableType.TABLE)) {
+            output = extractCreateTableDDL(table, htd, hcd);
+        } else if(table.getType().equals(PTableType.INDEX)) {
+            output = extractCreateIndexDDL(table);
+        } else if(table.getType().equals(PTableType.VIEW)) {
+            output = extractCreateViewDDL(table, htd, hcd);
+        }
         return 0;
     }
 
-    private String generateOutputString(String columnInfoString, String propertiesString) {
-        StringBuilder outputBuilder = new StringBuilder(CREATE_TABLE);
+    private String extractCreateIndexDDL(PTable indexPTable)
+            throws SQLException {
+        String baseTableName = indexPTable.getParentTableName().getString();
+        String baseTableFullName = SchemaUtil.getQualifiedTableName(indexPTable.getSchemaName().getString(), baseTableName);
+        PTable dataPTable = getPTable(baseTableFullName);
+        IndexMaintainer im;
+        try (Connection conn = getConnection(conf)) {
+            im = indexPTable.getIndexMaintainer(dataPTable, conn.unwrap(PhoenixConnection.class));
+        }
+        String defaultCF = SchemaUtil.getEmptyColumnFamilyAsString(indexPTable);
+        String indexedColumnsString = getIndexedColumnsString(indexPTable, dataPTable, defaultCF);
+        String coveredColumnsString = getCoveredColumnsString(indexPTable, defaultCF);
+
+
+        return generateIndexDDLString(baseTableFullName, indexedColumnsString, coveredColumnsString,
+                im.isLocalIndex());
+    }
+
+    //TODO: Indexed on an expression
+    // test with different default CF, key is a included
+    private String getIndexedColumnsString(PTable indexPTable, PTable dataPTable, String defaultCF) {
+
+        List<PColumn> indexPK = indexPTable.getPKColumns();
+        List<PColumn> dataPK = dataPTable.getPKColumns();
+        StringBuilder indexedColumnsBuilder = new StringBuilder();
+        for (PColumn indexedColumn : indexPK) {
+            String indexColumn = extractIndexColumn(indexedColumn.getName().getString(), defaultCF);
+            for(PColumn pColumn : dataPK) {
+                if(!pColumn.getName().getString().equalsIgnoreCase(indexColumn)) {
+                    if(indexedColumnsBuilder.length()!=0) {
+                        indexedColumnsBuilder.append(", ");
+                    }
+                    indexedColumnsBuilder.append(indexColumn);
+                    if(indexedColumn.getSortOrder()!= SortOrder.getDefault()) {
+                        indexedColumnsBuilder.append(" ");
+                        indexedColumnsBuilder.append(indexedColumn.getSortOrder());
+                    }
+                }
+            }
+        }
+        return indexedColumnsBuilder.toString();
+    }
+
+    private String extractIndexColumn(String columnName, String defaultCF) {
+        String [] columnNameSplit = columnName.split(":");
+        if(columnNameSplit[0].equals("") || columnNameSplit[0].equalsIgnoreCase(defaultCF)) {
+            return columnNameSplit[1];
+        } else {
+            return columnName.replace(":", ".");
+        }
+    }
+
+    private String getCoveredColumnsString(PTable indexPTable, String defaultCF) {
+        StringBuilder coveredColumnsBuilder = new StringBuilder();
+        List<PColumn> pkColumns = indexPTable.getColumns();
+        for (PColumn cc : pkColumns) {
+            if(coveredColumnsBuilder.length()!=0) {
+                coveredColumnsBuilder.append(", ");
+            }
+            if(cc.getFamilyName()!=null) {
+                String indexColumn = extractIndexColumn(cc.getName().getString(), defaultCF);
+                coveredColumnsBuilder.append(indexColumn);
+            }
+        }
+        return coveredColumnsBuilder.toString();
+    }
+
+    private String generateIndexDDLString(String baseTableFullName, String indexedColumnString, String coveredColumnString, boolean local) {
+        StringBuilder outputBuilder = new StringBuilder(String.format(CREATE_INDEX, local ? "LOCAL " : "", pTableName, baseTableFullName));
+        outputBuilder.append("(");
+        outputBuilder.append(indexedColumnString);
+        outputBuilder.append(")");
+        if(!coveredColumnString.equals("")) {
+            outputBuilder.append(" INCLUDE (");
+            outputBuilder.append(coveredColumnString);
+            outputBuilder.append(")");
+        }
+        return outputBuilder.toString();
+    }
+
+    private PTable getPTable(String pTableFullName) throws SQLException {
+        try (Connection conn = getConnection(conf)) {
+            return PhoenixRuntime.getTable(conn, pTableFullName);
+        }
+    }
+
+    private String extractCreateViewDDL(PTable table, HTableDescriptor htd, HColumnDescriptor hcd) {
+        return "";
+    }
+
+    private String extractCreateTableDDL(PTable table, HTableDescriptor htd, HColumnDescriptor hcd) {
+        populateDefaultProperties(table);
+        setPTableProperties(table);
+        setHTableProperties(htd);
+        setHColumnFamilyProperties(hcd);
+
+        String columnInfoString = getColumnInfoString(table);
+        String propertiesString = convertPropertiesToString();
+
+        return generateTableDDLString(columnInfoString, propertiesString);
+    }
+
+    private String generateTableDDLString(String columnInfoString, String propertiesString) {
+        String pTableFullName = SchemaUtil.getQualifiedTableName(pSchemaName, pTableName);
+        StringBuilder outputBuilder = new StringBuilder(String.format(CREATE_TABLE, pTableFullName));
         outputBuilder.append(columnInfoString).append(propertiesString);
         return outputBuilder.toString();
     }
 
-    private void populateDefaultProperties(PTable table, ConnectionQueryServicesImpl cqsi)
-            throws SQLException, IOException {
-        HTableDescriptor htd = cqsi.getAdmin().getTableDescriptor(
-                TableName.valueOf(table.getPhysicalName().getString()));
-        HColumnDescriptor columnDescriptor = htd.getFamily(SchemaUtil.getEmptyColumnFamily(table));
-        Map<String, String> propsMap = columnDescriptor.getDefaultValues();
-        for (String key : propsMap.keySet()) {
+    private void populateDefaultProperties(PTable table) {
+        Map<String, String> propsMap = HColumnDescriptor.getDefaultValues();
+        for (Map.Entry<String, String> entry : propsMap.entrySet()) {
+            String key = entry.getKey();
+            String value = entry.getValue();
+            defaultProps.put(key, value);
             if(key.equalsIgnoreCase(BLOOMFILTER) || key.equalsIgnoreCase(COMPRESSION)) {
                 defaultProps.put(key, "NONE");
-                continue;
             }
             if(key.equalsIgnoreCase(DATA_BLOCK_ENCODING)) {
                 defaultProps.put(key, String.valueOf(DEFAULT_DATA_BLOCK_ENCODING));
-                continue;
             }
-            defaultProps.put(key, propsMap.get(key));
         }
         defaultProps.putAll(table.getDefaultValues());
     }
 
-    private void setHTableProperties(PTable table, HTableDescriptor htd) {
+    private void setHTableProperties(HTableDescriptor htd) {
         Map<ImmutableBytesWritable, ImmutableBytesWritable> propsMap = htd.getValues();
-        for (ImmutableBytesWritable entry : propsMap.keySet()) {
-            if(Bytes.toString(entry.get()).contains("coprocessor") || Bytes.toString(entry.get()).contains(IS_META)) {
+        for (Map.Entry<ImmutableBytesWritable, ImmutableBytesWritable> entry : propsMap.entrySet()) {
+            ImmutableBytesWritable key = entry.getKey();
+            ImmutableBytesWritable value = entry.getValue();
+            if(Bytes.toString(key.get()).contains("coprocessor") || Bytes.toString(key.get()).contains(IS_META)) {
                 continue;
             }
-            defaultProps.put(Bytes.toString(entry.get()), "false");
-            definedProps.put(Bytes.toString(entry.get()), Bytes.toString(propsMap.get(entry).get()));
+            defaultProps.put(Bytes.toString(key.get()), "false");
+            definedProps.put(Bytes.toString(key.get()), Bytes.toString(value.get()));
         }
     }
 
-    private void setHColumnFamilyProperties(PTable table, HColumnDescriptor columnDescriptor) {
+    private void setHColumnFamilyProperties(HColumnDescriptor columnDescriptor) {
         Map<ImmutableBytesWritable, ImmutableBytesWritable> propsMap = columnDescriptor.getValues();
-        for (ImmutableBytesWritable entry : propsMap.keySet()) {
-            definedProps.put(Bytes.toString(entry.get()), Bytes.toString(propsMap.get(entry).get()));
+        for (Map.Entry<ImmutableBytesWritable, ImmutableBytesWritable> entry : propsMap.entrySet()) {
+            ImmutableBytesWritable key = entry.getKey();
+            ImmutableBytesWritable value = entry.getValue();
+            definedProps.put(Bytes.toString(key.get()), Bytes.toString(value.get()));
         }
     }
 
     private void setPTableProperties(PTable table) {
-        //MULTI_TENANT/IMMUTABLE_ROWS/COLUMN_ENCODED_BYTES/TRANSACTION_PROVIDER/SALT_BUCKETS/DATA_BLOCK_ENCODING/DISABLE_WAL
-        //UPDATE_CACHE_FREQUENCY/AUTO_PARTITION_SEQ/GUIDE_POSTS_WIDTH/IMMUTABLE_STORAGE_SCHEME/USE_STATS_FOR_PARALLELIZATION
         Map <String, String> map = table.getValues();
-        for(String key : map.keySet()) {
-            if(map.get(key) != null) {
-                definedProps.put(key, map.get(key));
+        for(Map.Entry<String, String> entry : map.entrySet()) {
+            String key = entry.getKey();
+            String value = entry.getValue();
+            if(value != null) {
+                definedProps.put(key, value);
             }
         }
     }
@@ -148,25 +247,22 @@ public class SchemaExtractionTool extends Configured implements Tool {
     private String convertPropertiesToString() {
         StringBuilder optionBuilder = new StringBuilder();
 
-        for(String key : definedProps.keySet()) {
-
-            if(definedProps.get(key)!=null && defaultProps.get(key) != null && !definedProps.get(key).equals(defaultProps.get(key))) {
-                if (!(optionBuilder.length() == 0)) {
+        for(Map.Entry<String, String> entry : definedProps.entrySet()) {
+            String key = entry.getKey();
+            String value = entry.getValue();
+            if(value!=null && defaultProps.get(key) != null && !value.equals(defaultProps.get(key))) {
+                if (optionBuilder.length() != 0) {
                     optionBuilder.append(",");
                 }
-                optionBuilder.append(key+"="+definedProps.get(key));
+                optionBuilder.append(key+"="+value);
             }
         }
         return optionBuilder.toString();
     }
 
-    private PTable getPTable() throws SQLException {
-        conf = HBaseConfiguration.addHbaseResources(getConf());
-
-        try (Connection conn = getConnection(conf)) {
-            String pTableFullName = SchemaUtil.getQualifiedTableName(pSchemaName, pTableName);
-            return PhoenixRuntime.getTable(conn, pTableFullName);
-        }
+    private PTable getPTable(String pSchemaName, String pTableName) throws SQLException {
+        String pTableFullName = SchemaUtil.getQualifiedTableName(pSchemaName, pTableName);
+        return getPTable(pTableFullName);
     }
 
     private ConnectionQueryServices getCQSIObject() throws SQLException {
@@ -203,7 +299,7 @@ public class SchemaExtractionTool extends Configured implements Tool {
         conf.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, indexRebuildRpcRetriesCounter);
     }
 
-    private String getColumnInfoString(PTable table, ConnectionQueryServices cqsi) {
+    private String getColumnInfoString(PTable table) {
         StringBuilder colInfo = new StringBuilder();
         colInfo.append('(');
         List<PColumn> columns = table.getColumns();
