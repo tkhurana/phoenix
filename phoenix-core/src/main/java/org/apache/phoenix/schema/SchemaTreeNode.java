@@ -30,11 +30,13 @@ abstract class SchemaTreeNode {
         json.put(NAME, table.getName().getString());
         json.put(TYPE, table.getType().toString());
         json.put(DDL, ddl);
-        JSONArray jsonChildren = new JSONArray();
-        for (SchemaTreeNode node : children) {
-            jsonChildren.put(node.toJSON());
+        if (children.size() > 0) {
+            JSONArray jsonChildren = new JSONArray();
+            for (SchemaTreeNode node : children) {
+                jsonChildren.put(node.toJSON());
+            }
+            json.put(CHILDREN, jsonChildren);
         }
-        json.put(CHILDREN, jsonChildren);
         return json;
     }
 }
