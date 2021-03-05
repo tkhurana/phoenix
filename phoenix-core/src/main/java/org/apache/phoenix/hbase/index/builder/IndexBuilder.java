@@ -149,5 +149,7 @@ public interface IndexBuilder extends Stoppable {
    */
   public List<Mutation> executeAtomicOp(Increment inc) throws IOException;
 
+  public List<Mutation> executeOnDupAtomicOp(Put put) throws IOException;
+
   public ReplayWrite getReplayWrite(Mutation m);
 }

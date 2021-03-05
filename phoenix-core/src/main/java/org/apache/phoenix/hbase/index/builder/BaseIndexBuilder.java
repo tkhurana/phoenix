@@ -18,6 +18,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.regionserver.MiniBatchOperationInProgress;
 import org.apache.hadoop.hbase.util.Pair;
@@ -99,7 +100,12 @@ public abstract class BaseIndexBuilder implements IndexBuilder {
     public List<Mutation> executeAtomicOp(Increment inc) throws IOException {
         return null;
     }
-    
+
+    @Override
+    public List<Mutation> executeOnDupAtomicOp(Put put) throws IOException {
+        return null;
+    }
+
     /**
      * Exposed for testing!
      * 

@@ -27,6 +27,7 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.Stoppable;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.regionserver.MiniBatchOperationInProgress;
 import org.apache.hadoop.hbase.util.Pair;
@@ -156,6 +157,10 @@ public class IndexBuildManager implements Stoppable {
 
   public List<Mutation> executeAtomicOp(Increment inc) throws IOException {
       return delegate.executeAtomicOp(inc);
+  }
+
+  public List<Mutation> executeOnDupAtomicOp(Put put) throws IOException {
+    return delegate.executeOnDupAtomicOp(put);
   }
   
   @Override

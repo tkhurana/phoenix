@@ -36,7 +36,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import org.apache.hadoop.hbase.TableName;
 import org.apache.phoenix.util.PropertiesUtil;
+import org.apache.phoenix.util.TestUtil;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -218,13 +220,14 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         Connection conn = DriverManager.getConnection(getUrl(), props);
         conn.setAutoCommit(autoCommit);
         String tableName = generateUniqueName();
-        String ddl = " create table " + tableName + "(pk varchar primary key, counter1 varchar, counter2 smallint)";
+        String ddl = " create table " + tableName + "(pk varchar primary key, counter1 varchar, counter2 smallint) COLUMN_ENCODED_BYTES=0";
         conn.createStatement().execute(ddl);
         createIndex(conn, tableName);
         String dml = "UPSERT INTO " + tableName + " VALUES('a','b') ON DUPLICATE KEY UPDATE counter1 = null";
         conn.createStatement().execute(dml);
         conn.createStatement().execute(dml);
         conn.commit();
+        TestUtil.dumpTable(conn, TableName.valueOf(tableName));
 
         ResultSet rs = conn.createStatement().executeQuery("SELECT * FROM " + tableName);
         assertTrue(rs.next());
@@ -239,6 +242,7 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         dml = "UPSERT INTO " + tableName + " VALUES('a','b', 0) ON DUPLICATE KEY UPDATE counter1 = 'c', counter2 = counter2 + 1";
         conn.createStatement().execute(dml);
         conn.commit();
+        TestUtil.dumpTable(conn, TableName.valueOf(tableName));
 
         rs = conn.createStatement().executeQuery("SELECT * FROM " + tableName);
         assertTrue(rs.next());
@@ -269,6 +273,7 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         
         conn.createStatement().execute("UPSERT INTO " + tableName + " VALUES('a',0) ON DUPLICATE KEY IGNORE");
         conn.commit();
+        TestUtil.dumpTable(conn, TableName.valueOf(tableName));
 
         rs = conn.createStatement().executeQuery("SELECT * FROM " + tableName + " WHERE counter1 >= 0");
         assertTrue(rs.next());
