@@ -21,6 +21,7 @@ import static org.apache.phoenix.hbase.index.util.IndexManagementUtil.rethrowInd
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -559,6 +560,12 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
                     context.multiMutationMap.put(row, stored);
                 }
                 stored.addAll(m);
+                Mutation[] mutationsAddedByCP = miniBatchOp.getOperationsFromCoprocessors(i);
+                if (mutationsAddedByCP != null) {
+                    for (Mutation addedMutation : mutationsAddedByCP) {
+                        stored.addAll(addedMutation);
+                    }
+                }
             }
         }
         return context.multiMutationMap.values();
@@ -751,6 +758,10 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
             localUpdates.add(next.getFirst());
         }
         if (!localUpdates.isEmpty()) {
+            Mutation[] mutationsAddedByCP = miniBatchOp.getOperationsFromCoprocessors(0);
+            if (mutationsAddedByCP != null) {
+                localUpdates.addAll(Arrays.asList(mutationsAddedByCP));
+            }
             miniBatchOp.addOperationsFromCP(0, localUpdates.toArray(new Mutation[localUpdates.size()]));
         }
     }
