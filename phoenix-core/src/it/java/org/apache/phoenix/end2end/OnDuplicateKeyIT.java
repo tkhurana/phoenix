@@ -57,7 +57,7 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
     @Parameters
     public static synchronized Collection<Object> data() {
         List<Object> testCases = Lists.newArrayList();
-        testCases.add(new String[] {
+        /*testCases.add(new String[] {
                 "",
         });
         testCases.add(new String[] {
@@ -65,7 +65,13 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         });
         testCases.add(new String[] {
                 "create local index %s_IDX on %s(counter1, counter2)",
+        });*/
+        testCases.add(new String[] {
+            "create index %s_IDX on %s(counter1) include (counter2)",
         });
+        /*testCases.add(new String[] {
+            "create index %s_IDX on %s(counter1, counter2)",
+        });*/
         return testCases;
     }
     
@@ -112,7 +118,7 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
         Connection conn = DriverManager.getConnection(getUrl(), props);
         String tableName = generateUniqueName();
-        String ddl = " create table " + tableName + "(k1 varchar, k2 varchar, counter1 varchar, counter2 date, other1 char(3), other2 varchar default 'f', constraint pk primary key (k1,k2))";
+        String ddl = " create table " + tableName + "(k1 varchar, k2 varchar, counter1 varchar, counter2 date, other1 char(3), other2 varchar default 'f', constraint pk primary key (k1,k2)) COLUMN_ENCODED_BYTES=0";
         conn.createStatement().execute(ddl);
         createIndex(conn, tableName);
         String dml = "UPSERT INTO " + tableName + " VALUES('a','b','c',null,'eee') " + 
@@ -237,8 +243,16 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         
         dml = "UPSERT INTO " + tableName + " VALUES('a','b',0)";
         conn.createStatement().execute(dml);
-        dml = "UPSERT INTO " + tableName + " VALUES('a','b', 0) ON DUPLICATE KEY UPDATE counter1 = null, counter2 = counter2 + 1";
+        dml = "UPSERT INTO " + tableName + " VALUES('a','b', 0) ON DUPLICATE KEY UPDATE counter1 = counter1 || 'de', counter2 = counter2 + 1";
         conn.createStatement().execute(dml);
+        conn.commit();
+        rs = conn.createStatement().executeQuery("SELECT * FROM " + tableName);
+        assertTrue(rs.next());
+        assertEquals("a",rs.getString(1));
+        assertEquals("de",rs.getString(2));
+        assertEquals(1,rs.getInt(3));
+        assertFalse(rs.next());
+
         dml = "UPSERT INTO " + tableName + " VALUES('a','b', 0) ON DUPLICATE KEY UPDATE counter1 = 'c', counter2 = counter2 + 1";
         conn.createStatement().execute(dml);
         conn.commit();
@@ -463,12 +477,12 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
         Connection conn = DriverManager.getConnection(getUrl(), props);
         final String tableName = generateUniqueName();
-        String ddl = " create table " + tableName + "(pk varchar primary key, counter1 integer, counter2 integer)";
+        String ddl = " create table " + tableName + "(pk varchar primary key, counter1 integer, counter2 integer) COLUMN_ENCODED_BYTES=0";
         conn.createStatement().execute(ddl);
         createIndex(conn, tableName);
         int nThreads = 10;
         final int[] resultHolder = new int[1];
-        final int nCommits = 100;
+        final int nCommits = 200;
         final int nIncrementsPerCommit = 2;
         ExecutorService exec = Executors.newFixedThreadPool(nThreads);
         List<Future> futures = Lists.newArrayListWithExpectedSize(nThreads);
@@ -501,6 +515,8 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
             future.get();
         }
         exec.shutdownNow();
+        TestUtil.dumpTable(conn, TableName.valueOf(tableName));
+        TestUtil.dumpTable(conn, TableName.valueOf(tableName + "_IDX"));
 
         int finalResult = nThreads * nCommits * nIncrementsPerCommit;
         //assertEquals(finalResult,resultHolder[0]);
@@ -525,7 +541,7 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         Connection conn = DriverManager.getConnection(getUrl(), props);
         conn.setAutoCommit(false);
         String tableName = generateUniqueName();
-        String ddl = " create table " + tableName + "(pk varchar primary key, \"counter1\" varchar, \"counter2\" smallint)";
+        String ddl = " create table " + tableName + "(pk varchar primary key, \"counter1\" varchar, \"counter2\" smallint) COLUMN_ENCODED_BYTES=0";
         conn.createStatement().execute(ddl);
         String dml = "UPSERT INTO " + tableName + " VALUES('a','b') ON DUPLICATE KEY UPDATE \"counter1\" = null";
         conn.createStatement().execute(dml);

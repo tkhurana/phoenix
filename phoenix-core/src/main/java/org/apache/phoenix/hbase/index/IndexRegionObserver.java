@@ -19,25 +19,44 @@ package org.apache.phoenix.hbase.index;
 
 import static org.apache.phoenix.hbase.index.util.IndexManagementUtil.rethrowIndexingException;
 
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.EOFException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
 import org.apache.hadoop.hbase.CellScanner;
+import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.PhoenixTagType;
 import org.apache.hadoop.hbase.Tag;
 import org.apache.hadoop.hbase.TagRewriteCell;
+import org.apache.hadoop.hbase.client.Get;
+import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.Region;
+import org.apache.hadoop.io.WritableUtils;
+import org.apache.phoenix.coprocessor.generated.PTableProtos;
+import org.apache.phoenix.exception.DataExceedsCapacityException;
+import org.apache.phoenix.expression.Expression;
+import org.apache.phoenix.expression.ExpressionType;
+import org.apache.phoenix.expression.KeyValueColumnExpression;
+import org.apache.phoenix.expression.visitor.ExpressionVisitor;
+import org.apache.phoenix.expression.visitor.StatelessTraverseAllExpressionVisitor;
+import org.apache.phoenix.index.PhoenixIndexBuilder;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
@@ -89,11 +108,17 @@ import org.apache.phoenix.index.IndexMaintainer;
 import org.apache.phoenix.index.PhoenixIndexMetaData;
 import org.apache.phoenix.query.KeyRange;
 import org.apache.phoenix.query.QueryServicesOptions;
+import org.apache.phoenix.schema.PColumn;
+import org.apache.phoenix.schema.PRow;
+import org.apache.phoenix.schema.PTable;
+import org.apache.phoenix.schema.PTableImpl;
 import org.apache.phoenix.schema.PTableType;
+import org.apache.phoenix.schema.tuple.MultiKeyValueTuple;
 import org.apache.phoenix.schema.tuple.Tuple;
 import org.apache.phoenix.schema.types.PVarbinary;
 import org.apache.phoenix.trace.TracingUtils;
 import org.apache.phoenix.trace.util.NullSpan;
+import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.ScanUtil;
 import org.apache.phoenix.util.SchemaUtil;
@@ -109,6 +134,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.apache.phoenix.coprocessor.IndexRebuildRegionScanner.applyNew;
 import static org.apache.phoenix.coprocessor.IndexRebuildRegionScanner.removeColumn;
+import static org.apache.phoenix.index.PhoenixIndexBuilder.ATOMIC_OP_ATTRIB;
 
 /**
  * Do all the work of managing index updates from a single coprocessor. All Puts/Delets are passed
@@ -501,11 +527,39 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
       }
   }
 
-  private void addOnDupMutationsToBatch(MiniBatchOperationInProgress<Mutation> miniBatchOp) throws IOException {
+  private void logMutations(List<Mutation> mutations) {
+      for (Mutation m : mutations) {
+          logMutation(m);
+      }
+  }
+
+  private void logCellList(List<Cell> cellList) {
+      for (Cell cell : cellList) {
+          LOG.info(cell + "column= " +
+              Bytes.toString(CellUtil.cloneQualifier(cell)) +
+              " val=" + Bytes.toStringBinary(CellUtil.cloneValue(cell)));
+      }
+  }
+
+  private void logMutation(Mutation m) {
+      if (m == null) {
+          LOG.info("null mutation");
+          return;
+      }
+      LOG.info("-----------------------------------------------");
+      for (List<Cell> cellList : m.getFamilyCellMap().values()) {
+          logCellList(cellList);
+      }
+      LOG.info("-----------------------------------------------");
+  }
+
+  private void addOnDupMutationsToBatch(MiniBatchOperationInProgress<Mutation> miniBatchOp, BatchMutateContext context) throws IOException {
       for (int i = 0; i < miniBatchOp.size(); i++) {
           Mutation m = miniBatchOp.getOperation(i);
           if (this.builder.isAtomicOp(m) && m instanceof Put) {
-              List<Mutation> mutations = this.builder.executeOnDupAtomicOp((Put)m);
+              List<Mutation> mutations = getOnDupMutations(context, (Put)m);
+              LOG.info("Dumping generated on dup mutations");
+              logMutations(mutations);
               if (!mutations.isEmpty()) {
                   addOnDupMutationsToBatch(miniBatchOp, i, mutations);
               } else {
@@ -713,7 +767,7 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
             return;
         }
         // Retrieve the current row states from the data table
-        getCurrentRowStates(c, context);
+        //getCurrentRowStates(c, context);
         applyPendingPutMutations(miniBatchOp, context, now);
         applyPendingDeleteMutations(miniBatchOp, context);
     }
@@ -1054,7 +1108,9 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
             return;
         }
         lockRows(context);
-        addOnDupMutationsToBatch(miniBatchOp);
+        // Retrieve the current row states from the data table
+        getCurrentRowStates(c, context);
+        addOnDupMutationsToBatch(miniBatchOp, context);
         long now = EnvironmentEdgeManager.currentTimeMillis();
         // Update the timestamps of the data table mutations to prevent overlapping timestamps (which prevents index
         // inconsistencies as this case isn't handled correctly currently).
@@ -1081,8 +1137,10 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
             }
             // Release the locks before making RPC calls for index updates
             unlockRows(context);
+            LOG.info(String.format("Before pre index updates %s", Thread.currentThread().getId()));
             // Do the first phase index updates
             doPre(c, context, miniBatchOp);
+            LOG.info(String.format("After pre index updates %s", Thread.currentThread().getId()));
             // Acquire the locks again before letting the region proceed with data table updates
             lockRows(context);
             if (context.lastConcurrentBatchContext != null) {
@@ -1287,5 +1345,211 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
       properties.put(IndexRegionObserver.INDEX_BUILDER_CONF_KEY, builder.getName());
       desc.addCoprocessor(IndexRegionObserver.class.getName(), null, priority, properties);
   }
+
+    private List<Mutation> getOnDupMutations(BatchMutateContext context, Put atomicPut) throws IOException {
+        List<Mutation> mutations = Lists.newArrayListWithExpectedSize(2);
+        byte[] opBytes = atomicPut.getAttribute(ATOMIC_OP_ATTRIB);
+        if (opBytes == null) { // Unexpected
+            return null;
+        }
+        //inc.setAttribute(ATOMIC_OP_ATTRIB, null);
+        Put put = null;
+        Delete delete = null;
+        // We cannot neither use the time stamp in the Increment to set the Get time range
+        // nor set the Put/Delete time stamp and have this be atomic as HBase does not
+        // handle that. Though we disallow using ON DUPLICATE KEY clause when the
+        // CURRENT_SCN is set, we still may have a time stamp set as of when the table
+        // was resolved on the client side. We need to ignore this as well due to limitations
+        // in HBase, but this isn't too bad as the time will be very close the the current
+        // time anyway.
+        long ts = HConstants.LATEST_TIMESTAMP;
+        ImmutableBytesPtr rowKeyPtr = new ImmutableBytesPtr(atomicPut.getRow());
+        Pair<Put, Put> dataRowState = context.dataRowStates.get(rowKeyPtr);
+        byte[] rowKey = atomicPut.getRow();
+        final Get get = new Get(rowKey);
+        if (PhoenixIndexBuilder.isDupKeyIgnore(opBytes)) {
+            if (dataRowState == null) {
+                // new row
+                mutations.add(atomicPut);
+            }
+            return mutations;
+        }
+        ByteArrayInputStream stream = new ByteArrayInputStream(opBytes);
+        DataInputStream input = new DataInputStream(stream);
+        boolean skipFirstOp = input.readBoolean();
+        short repeat = input.readShort();
+        final int[] estimatedSizeHolder = {0};
+        List<Pair<PTable, List<Expression>>> operations = Lists.newArrayListWithExpectedSize(3);
+        while (true) {
+            ExpressionVisitor<Void> visitor = new StatelessTraverseAllExpressionVisitor<Void>() {
+                @Override
+                public Void visit(KeyValueColumnExpression expression) {
+                    get.addColumn(expression.getColumnFamily(), expression.getColumnQualifier());
+                    estimatedSizeHolder[0]++;
+                    return null;
+                }
+            };
+            try {
+                int nExpressions = WritableUtils.readVInt(input);
+                List<Expression> expressions = Lists.newArrayListWithExpectedSize(nExpressions);
+                for (int i = 0; i < nExpressions; i++) {
+                    Expression expression = ExpressionType.values()[WritableUtils.readVInt(input)].newInstance();
+                    expression.readFields(input);
+                    expressions.add(expression);
+                    expression.accept(visitor);
+                }
+                PTableProtos.PTable tableProto = PTableProtos.PTable.parseDelimitedFrom(input);
+                PTable table = PTableImpl.createFromProto(tableProto);
+                operations.add(new Pair<>(table, expressions));
+            } catch (EOFException e) {
+                break;
+            }
+        }
+        int estimatedSize = estimatedSizeHolder[0];
+        if (get.getFamilyMap().isEmpty()) {
+            get.setFilter(new FirstKeyOnlyFilter());
+        }
+        MultiKeyValueTuple tuple;
+        List<Cell> flattenedCells = null;
+        Put currentDataRowState = dataRowState != null ? dataRowState.getFirst() : null;
+        LOG.info("Dumping current data row");
+        logMutation(currentDataRowState);
+        List<Cell> cells = filterColumnsFromRow(currentDataRowState, get);
+        logCellList(cells);
+        if (cells.isEmpty()) {
+            if (skipFirstOp) {
+                if (operations.size() <= 1 && repeat <= 1) {
+                    mutations.add(atomicPut);
+                    return mutations;
+                }
+                repeat--; // Skip first operation (if first wasn't ON DUPLICATE KEY IGNORE)
+            }
+            // Base current state off of new row
+            flattenedCells = flattenCells(atomicPut);
+            tuple = new MultiKeyValueTuple(flattenedCells);
+        } else {
+            // Base current state off of existing row
+            tuple = new MultiKeyValueTuple(cells);
+        }
+        ImmutableBytesWritable ptr = new ImmutableBytesWritable();
+        for (int opIndex = 0; opIndex < operations.size(); opIndex++) {
+            Pair<PTable, List<Expression>> operation = operations.get(opIndex);
+            PTable table = operation.getFirst();
+            List<Expression> expressions = operation.getSecond();
+            for (int j = 0; j < repeat; j++) { // repeater loop
+                ptr.set(rowKey);
+                // Sort the list of cells (if they've been flattened in which case they're not necessarily
+                // ordered correctly). We only need the list sorted if the expressions are going to be
+                // executed, not when the outer loop is exited. Hence we do it here, at the top of the loop.
+                if (flattenedCells != null) {
+                    Collections.sort(flattenedCells, KeyValue.COMPARATOR);
+                }
+                PRow row = table.newRow(GenericKeyValueBuilder.INSTANCE, ts, ptr, false);
+                int adjust = table.getBucketNum() == null ? 1 : 2;
+                for (int i = 0; i < expressions.size(); i++) {
+                    Expression expression = expressions.get(i);
+                    ptr.set(ByteUtil.EMPTY_BYTE_ARRAY);
+                    expression.evaluate(tuple, ptr);
+                    PColumn column = table.getColumns().get(i + adjust);
+                    Object value = expression.getDataType().toObject(ptr, column.getSortOrder());
+                    System.out.println(String.format("column: %s value: %s", column.getName().getString(), value != null ? value.toString() : "null"));
+                    // We are guaranteed that the two column will have the
+                    // same type.
+                    if (!column.getDataType().isSizeCompatible(ptr, value, column.getDataType(),
+                        expression.getSortOrder(), expression.getMaxLength(), expression.getScale(),
+                        column.getMaxLength(), column.getScale())) {
+                        throw new DataExceedsCapacityException(column.getDataType(), column.getMaxLength(),
+                            column.getScale(), column.getName().getString());
+                    }
+                    column.getDataType().coerceBytes(ptr, value, expression.getDataType(), expression.getMaxLength(),
+                        expression.getScale(), expression.getSortOrder(), column.getMaxLength(), column.getScale(),
+                        column.getSortOrder(), table.rowKeyOrderOptimizable());
+                    byte[] bytes = ByteUtil.copyKeyBytesIfNecessary(ptr);
+                    row.setValue(column, bytes);
+                }
+                flattenedCells = Lists.newArrayListWithExpectedSize(estimatedSize);
+                List<Mutation> newMutations = row.toRowMutations();
+                for (Mutation source : newMutations) {
+                    flattenCells(source, flattenedCells);
+                }
+                tuple.setKeyValues(flattenedCells);
+            }
+            // Repeat only applies to first statement
+            repeat = 1;
+        }
+
+        for (int i = 0; i < tuple.size(); i++) {
+            Cell cell = tuple.getValue(i);
+            if (Type.codeToType(cell.getTypeByte()) == Type.Put) {
+                if (put == null) {
+                    put = new Put(rowKey);
+                    transferAttributes(atomicPut, put);
+                    mutations.add(put);
+                }
+                put.add(cell);
+            } else {
+                if (delete == null) {
+                    delete = new Delete(rowKey);
+                    transferAttributes(atomicPut, delete);
+                    mutations.add(delete);
+                }
+                delete.addDeleteMarker(cell);
+            }
+        }
+        return mutations;
+    }
+
+    private List<Cell> filterColumnsFromRow(Put currentDataRow, Get get) {
+        if (currentDataRow == null) {
+            return Collections.EMPTY_LIST;
+        }
+
+        List<Cell> filteredColumns = Lists.newArrayList();
+        Map<byte[], NavigableSet<byte[]>> familyMap = get.getFamilyMap();
+
+        // just return any cell FirstKeyOnlyFilter
+        if (familyMap.isEmpty()) {
+            for (List<Cell> cells : currentDataRow.getFamilyCellMap().values()) {
+                if (cells == null || cells.isEmpty()) {
+                    continue;
+                }
+                filteredColumns.add(cells.get(0));
+                break;
+            }
+            return filteredColumns;
+        }
+
+        for (Map.Entry<byte [], NavigableSet<byte[]>> entry : familyMap.entrySet()) {
+            if (entry.getValue() == null) {
+                continue;
+            }
+            for (byte [] column : entry.getValue()) {
+                List<Cell> cells = currentDataRow.get(entry.getKey(), column);
+                if (cells != null && !cells.isEmpty()) {
+                    filteredColumns.add(cells.get(0));
+                }
+            }
+        }
+
+        return filteredColumns;
+    }
+
+    private static List<Cell> flattenCells(Mutation m) {
+        List<Cell> flattenedCells = new ArrayList<>();
+        flattenCells(m, flattenedCells);
+        return flattenedCells;
+    }
+
+    private static void flattenCells(Mutation m, List<Cell> flattenedCells) {
+        for (List<Cell> cells : m.getFamilyCellMap().values()) {
+            flattenedCells.addAll(cells);
+        }
+    }
+
+    private static void transferAttributes(Mutation source, Mutation target) {
+        for (Map.Entry<String, byte[]> entry : source.getAttributesMap().entrySet()) {
+            target.setAttribute(entry.getKey(), entry.getValue());
+        }
+    }
 }
 
