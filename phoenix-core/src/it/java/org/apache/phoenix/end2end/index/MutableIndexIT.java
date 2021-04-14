@@ -999,7 +999,38 @@ public class MutableIndexIT extends ParallelStatsDisabledIT {
         }
     }
 
-private void upsertRow(String dml, Connection tenantConn, int i) throws SQLException {
+    @Test
+    public void testOnDupKeyWithGlobalIndex() throws Exception {
+        if (localIndex || tableDDLOptions.contains("TRANSACTIONAL")) {
+            return;
+        }
+        String schemaName = generateUniqueName();
+        String dataTableName = "TBL_" + generateUniqueName();
+        String dataTableFullName = SchemaUtil.getTableName(schemaName, dataTableName);
+        String indexTableName = "IND_" + generateUniqueName();
+        try (Connection conn = getConnection()) {
+            conn.createStatement().execute(String.format(
+                "CREATE TABLE %s (k integer not null primary key, v bigint, v2 bigint)", dataTableFullName));
+            conn.createStatement().execute(String.format("CREATE INDEX %s ON %s (v)",
+                indexTableName, dataTableFullName));
+            conn.createStatement().execute(String.format(
+                "UPSERT INTO %s VALUES(0,5,100)", dataTableFullName));
+            conn.createStatement().execute(String.format(
+                "UPSERT INTO %s VALUES(0,0,2) ON DUPLICATE KEY UPDATE v = v + 2", dataTableFullName));
+            conn.commit();
+            String dql = String.format("SELECT v,v2 FROM %s", dataTableFullName);
+            ResultSet rs;
+            rs = conn.createStatement().executeQuery("EXPLAIN " + dql);
+            System.out.println(QueryUtil.getExplainPlan(rs));
+            rs = conn.createStatement().executeQuery(dql);
+            assertTrue(rs.next());
+            assertEquals(rs.getInt(1), 7);
+            assertEquals(rs.getInt(2), 100);
+        }
+    }
+
+
+    private void upsertRow(String dml, Connection tenantConn, int i) throws SQLException {
     PreparedStatement stmt = tenantConn.prepareStatement(dml);
       stmt.setString(1, "00000000000000" + String.valueOf(i));
       stmt.setString(2, String.valueOf(i));

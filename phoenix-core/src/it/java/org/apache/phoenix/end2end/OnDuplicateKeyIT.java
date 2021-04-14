@@ -36,7 +36,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import org.apache.hadoop.hbase.TableName;
 import org.apache.phoenix.util.PropertiesUtil;
+import org.apache.phoenix.util.TestUtil;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -63,6 +65,12 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         });
         testCases.add(new String[] {
                 "create local index %s_IDX on %s(counter1, counter2)",
+        });
+        testCases.add(new String[] {
+                "create index %s_IDX on %s(counter1) include (counter2)",
+        });
+        testCases.add(new String[] {
+                "create index %s_IDX on %s(counter1, counter2)",
         });
         return testCases;
     }
@@ -260,6 +268,10 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         createIndex(conn, tableName);
         conn.createStatement().execute("UPSERT INTO " + tableName + " VALUES('a',10)");
         conn.commit();
+        TestUtil.dumpTable(conn, TableName.valueOf(tableName));
+        if (this.indexDDL != null && this.indexDDL.length() > 0 && !this.indexDDL.contains("local")) {
+            TestUtil.dumpTable(conn, TableName.valueOf(tableName + "_IDX"));
+        }
 
         ResultSet rs = conn.createStatement().executeQuery("SELECT * FROM " + tableName + " WHERE counter1 >= 0");
         assertTrue(rs.next());
@@ -269,6 +281,10 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         
         conn.createStatement().execute("UPSERT INTO " + tableName + " VALUES('a',0) ON DUPLICATE KEY IGNORE");
         conn.commit();
+        TestUtil.dumpTable(conn, TableName.valueOf(tableName));
+        if (this.indexDDL != null && this.indexDDL.length() > 0 && !this.indexDDL.contains("local")) {
+            TestUtil.dumpTable(conn, TableName.valueOf(tableName + "_IDX"));
+        }
 
         rs = conn.createStatement().executeQuery("SELECT * FROM " + tableName + " WHERE counter1 >= 0");
         assertTrue(rs.next());

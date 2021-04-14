@@ -17,28 +17,12 @@
  */
 package org.apache.phoenix.hbase.index;
 
-import static org.apache.phoenix.hbase.index.util.IndexManagementUtil.rethrowIndexingException;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
-import org.apache.hadoop.hbase.CellScanner;
-import org.apache.hadoop.hbase.PhoenixTagType;
-import org.apache.hadoop.hbase.Tag;
-import org.apache.hadoop.hbase.TagRewriteCell;
-import org.apache.phoenix.query.QueryServices;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.CoprocessorEnvironment;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
@@ -46,9 +30,14 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HConstants.OperationStatusCode;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.KeyValue.Type;
+import org.apache.hadoop.hbase.PhoenixTagType;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.Tag;
+import org.apache.hadoop.hbase.TagRewriteCell;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
+import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
@@ -56,6 +45,8 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
+import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.regionserver.MiniBatchOperationInProgress;
 import org.apache.hadoop.hbase.regionserver.OperationStatus;
 import org.apache.hadoop.hbase.regionserver.Region;
@@ -63,6 +54,7 @@ import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.io.WritableUtils;
 import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.htrace.Span;
 import org.apache.htrace.Trace;
@@ -72,6 +64,13 @@ import org.apache.phoenix.compat.hbase.coprocessor.CompatIndexRegionObserver;
 import org.apache.phoenix.compile.ScanRanges;
 import org.apache.phoenix.coprocessor.DelegateRegionCoprocessorEnvironment;
 import org.apache.phoenix.coprocessor.GlobalIndexRegionScanner;
+import org.apache.phoenix.coprocessor.generated.PTableProtos;
+import org.apache.phoenix.exception.DataExceedsCapacityException;
+import org.apache.phoenix.expression.Expression;
+import org.apache.phoenix.expression.ExpressionType;
+import org.apache.phoenix.expression.KeyValueColumnExpression;
+import org.apache.phoenix.expression.visitor.ExpressionVisitor;
+import org.apache.phoenix.expression.visitor.StatelessTraverseAllExpressionVisitor;
 import org.apache.phoenix.filter.SkipScanFilter;
 import org.apache.phoenix.hbase.index.LockManager.RowLock;
 import org.apache.phoenix.hbase.index.builder.IndexBuildManager;
@@ -85,13 +84,21 @@ import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.hbase.index.write.IndexWriter;
 import org.apache.phoenix.hbase.index.write.LazyParallelWriterIndexCommitter;
 import org.apache.phoenix.index.IndexMaintainer;
+import org.apache.phoenix.index.PhoenixIndexBuilder;
 import org.apache.phoenix.index.PhoenixIndexMetaData;
 import org.apache.phoenix.query.KeyRange;
+import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
+import org.apache.phoenix.schema.PColumn;
+import org.apache.phoenix.schema.PRow;
+import org.apache.phoenix.schema.PTable;
+import org.apache.phoenix.schema.PTableImpl;
 import org.apache.phoenix.schema.PTableType;
+import org.apache.phoenix.schema.tuple.MultiKeyValueTuple;
 import org.apache.phoenix.schema.types.PVarbinary;
 import org.apache.phoenix.trace.TracingUtils;
 import org.apache.phoenix.trace.util.NullSpan;
+import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.ServerUtil;
@@ -100,12 +107,29 @@ import org.apache.phoenix.util.WALAnnotationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.apache.phoenix.coprocessor.IndexRebuildRegionScanner.applyNew;
 import static org.apache.phoenix.coprocessor.IndexRebuildRegionScanner.removeColumn;
+import static org.apache.phoenix.hbase.index.util.IndexManagementUtil.rethrowIndexingException;
+import static org.apache.phoenix.index.PhoenixIndexBuilder.ATOMIC_OP_ATTRIB;
 
 /**
  * Do all the work of managing index updates from a single coprocessor. All Puts/Delets are passed
@@ -471,10 +495,73 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
               continue;
           }
           Mutation m = miniBatchOp.getOperation(i);
-          if (this.builder.isEnabled(m)) {
+          if (this.builder.isAtomicOp(m) || this.builder.isEnabled(m)) {
               ImmutableBytesPtr row = new ImmutableBytesPtr(m.getRow());
               if (!context.rowsToLock.contains(row)) {
                   context.rowsToLock.add(row);
+              }
+          }
+      }
+  }
+
+  private void addOnDupMutationsToBatch(MiniBatchOperationInProgress<Mutation> miniBatchOp,
+                                          int index, List<Mutation> mutations) {
+      List<Delete> deleteMutations = Lists.newArrayListWithExpectedSize(mutations.size());
+      for (Mutation m : mutations) {
+          if (m instanceof Put) {
+              // fix client mutation
+              Mutation original = miniBatchOp.getOperation(index);
+              original.getFamilyCellMap().putAll(m.getFamilyCellMap());
+          } else if (m instanceof Delete) {
+              deleteMutations.add((Delete)m);
+          }
+      }
+
+      if (!deleteMutations.isEmpty()) {
+          miniBatchOp.addOperationsFromCP(index,
+              deleteMutations.toArray(new Mutation[deleteMutations.size()]));
+      }
+  }
+
+  private void logMutations(List<Mutation> mutations) {
+      for (Mutation m : mutations) {
+          logMutation(m);
+      }
+  }
+
+  private void logCellList(List<Cell> cellList) {
+      for (Cell cell : cellList) {
+          LOG.info(cell + "column= " +
+              Bytes.toString(CellUtil.cloneQualifier(cell)) +
+              " val=" + Bytes.toStringBinary(CellUtil.cloneValue(cell)));
+      }
+  }
+
+  private void logMutation(Mutation m) {
+      if (m == null) {
+          LOG.info("null mutation");
+          return;
+      }
+      LOG.info("-----------------------------------------------");
+      for (List<Cell> cellList : m.getFamilyCellMap().values()) {
+          logCellList(cellList);
+      }
+      LOG.info("-----------------------------------------------");
+  }
+
+  private void addOnDupMutationsToBatch(MiniBatchOperationInProgress<Mutation> miniBatchOp,
+                                        BatchMutateContext context) throws IOException {
+      for (int i = 0; i < miniBatchOp.size(); i++) {
+          Mutation m = miniBatchOp.getOperation(i);
+          if (this.builder.isAtomicOp(m) && m instanceof Put) {
+              List<Mutation> mutations = generateOnDupMutations(context, (Put)m);
+              LOG.info("Dumping generated on dup mutations");
+              logMutations(mutations);
+              if (!mutations.isEmpty()) {
+                  addOnDupMutationsToBatch(miniBatchOp, i, mutations);
+              } else {
+                  // empty list of generated mutations implies ON DUPLICATE KEY IGNORE
+                  miniBatchOp.setOperationStatus(i, IGNORE);
               }
           }
       }
@@ -524,25 +611,44 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
                     context.multiMutationMap.put(row, stored);
                 }
                 stored.addAll(m);
+                Mutation[] mutationsAddedByCP = miniBatchOp.getOperationsFromCoprocessors(i);
+                if (mutationsAddedByCP != null) {
+                    for (Mutation addedMutation : mutationsAddedByCP) {
+                        stored.addAll(addedMutation);
+                    }
+                }
             }
         }
         return context.multiMutationMap.values();
     }
 
-    public static void setTimestamps(MiniBatchOperationInProgress<Mutation> miniBatchOp, IndexBuildManager builder, long ts) throws IOException {
+    public static void setTimestamps(MiniBatchOperationInProgress<Mutation> miniBatchOp,
+                                     IndexBuildManager builder, long ts) throws IOException {
         for (Integer i = 0; i < miniBatchOp.size(); i++) {
             if (miniBatchOp.getOperationStatus(i) == IGNORE) {
                 continue;
             }
             Mutation m = miniBatchOp.getOperation(i);
-            // skip this mutation if we aren't enabling indexing
-            if (!builder.isEnabled(m)) {
+            // skip this mutation if we aren't enabling indexing or not an atomic op
+            if (!builder.isEnabled(m) && !builder.isAtomicOp(m)) {
                 continue;
             }
-            for (List<Cell> cells : m.getFamilyCellMap().values()) {
-                for (Cell cell : cells) {
-                    CellUtil.setTimestamp(cell, ts);
+            setTimestampOnMutation(m, ts);
+
+            // set the timestamps on any additional mutations added
+            Mutation[] mutationsAddedByCP = miniBatchOp.getOperationsFromCoprocessors(i);
+            if (mutationsAddedByCP != null) {
+                for (Mutation addedMutation : mutationsAddedByCP) {
+                    setTimestampOnMutation(addedMutation, ts);
                 }
+            }
+        }
+    }
+
+    private static void setTimestampOnMutation(Mutation m, long ts) throws IOException {
+        for (List<Cell> cells : m.getFamilyCellMap().values()) {
+            for (Cell cell : cells) {
+                CellUtil.setTimestamp(cell, ts);
             }
         }
     }
@@ -563,38 +669,51 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
             if (!(m instanceof Delete)) {
                 continue;
             }
-            ImmutableBytesPtr rowKeyPtr = new ImmutableBytesPtr(m.getRow());
-            Pair<Put, Put> dataRowState = context.dataRowStates.get(rowKeyPtr);
-            if (dataRowState == null) {
-                dataRowState = new Pair<Put, Put>(null, null);
-                context.dataRowStates.put(rowKeyPtr, dataRowState);
-            }
-            Put nextDataRowState = dataRowState.getSecond();
-            if (nextDataRowState == null) {
-                if (dataRowState.getFirst() == null) {
-                    // This is a delete row mutation on a non-existing row. There is no need to apply this mutation
-                    // on the data table
-                    miniBatchOp.setOperationStatus(i, NOWRITE);
-                }
-                continue;
-            }
-            for (List<Cell> cells : m.getFamilyCellMap().values()) {
-                for (Cell cell : cells) {
-                    switch (KeyValue.Type.codeToType(cell.getTypeByte())) {
-                        case DeleteFamily:
-                        case DeleteFamilyVersion:
-                            nextDataRowState.getFamilyCellMap().remove(CellUtil.cloneFamily(cell));
-                            break;
-                        case DeleteColumn:
-                        case Delete:
-                            removeColumn(nextDataRowState, cell);
-                    }
-                }
-            }
-            if (nextDataRowState != null && nextDataRowState.getFamilyCellMap().size() == 0) {
-                dataRowState.setSecond(null);
+
+            if (!applyOnePendingDeleteMutation(context, (Delete) m)) {
+                miniBatchOp.setOperationStatus(i, NOWRITE);
             }
         }
+    }
+
+    /**
+     * This method returns true if the pending delete mutation needs to be applied
+     * and false f the delete mutation can be ignored for example in the case of
+     * delete on non-existing row.
+     */
+    private boolean applyOnePendingDeleteMutation(BatchMutateContext context, Delete delete) {
+        ImmutableBytesPtr rowKeyPtr = new ImmutableBytesPtr(delete.getRow());
+        Pair<Put, Put> dataRowState = context.dataRowStates.get(rowKeyPtr);
+        if (dataRowState == null) {
+            dataRowState = new Pair<Put, Put>(null, null);
+            context.dataRowStates.put(rowKeyPtr, dataRowState);
+        }
+        Put nextDataRowState = dataRowState.getSecond();
+        if (nextDataRowState == null) {
+            if (dataRowState.getFirst() == null) {
+                // This is a delete row mutation on a non-existing row. There is no need to apply this mutation
+                // on the data table
+                return false;
+            }
+        }
+
+        for (List<Cell> cells : delete.getFamilyCellMap().values()) {
+            for (Cell cell : cells) {
+                switch (KeyValue.Type.codeToType(cell.getTypeByte())) {
+                    case DeleteFamily:
+                    case DeleteFamilyVersion:
+                        nextDataRowState.getFamilyCellMap().remove(CellUtil.cloneFamily(cell));
+                        break;
+                    case DeleteColumn:
+                    case Delete:
+                        removeColumn(nextDataRowState, cell);
+                }
+            }
+        }
+        if (nextDataRowState != null && nextDataRowState.getFamilyCellMap().size() == 0) {
+            dataRowState.setSecond(null);
+        }
+        return true;
     }
 
     /**
@@ -612,21 +731,32 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
             if (!this.builder.isEnabled(m)) {
                 continue;
             }
-            if (m instanceof Put) {
-                ImmutableBytesPtr rowKeyPtr = new ImmutableBytesPtr(m.getRow());
-                Pair<Put, Put> dataRowState = context.dataRowStates.get(rowKeyPtr);
-                if (dataRowState == null) {
-                    dataRowState = new Pair<Put, Put>(null, null);
-                    context.dataRowStates.put(rowKeyPtr, dataRowState);
+
+            if (!(m instanceof Put)) {
+                continue;
+            }
+
+            ImmutableBytesPtr rowKeyPtr = new ImmutableBytesPtr(m.getRow());
+            Pair<Put, Put> dataRowState = context.dataRowStates.get(rowKeyPtr);
+            if (dataRowState == null) {
+                dataRowState = new Pair<Put, Put>(null, null);
+                context.dataRowStates.put(rowKeyPtr, dataRowState);
+            }
+            Put nextDataRowState = dataRowState.getSecond();
+            dataRowState.setSecond((nextDataRowState != null) ? applyNew((Put) m, nextDataRowState) : new Put((Put) m));
+
+            Mutation[] mutationsAddedByCP = miniBatchOp.getOperationsFromCoprocessors(i);
+            if (mutationsAddedByCP != null) {
+                // all added mutations are of type delete corresponding to set nulls
+                for (Mutation addedMutation : mutationsAddedByCP) {
+                    applyOnePendingDeleteMutation(context, (Delete)addedMutation);
                 }
-                Put nextDataRowState = dataRowState.getSecond();
-                dataRowState.setSecond((nextDataRowState != null) ? applyNew((Put) m, nextDataRowState) : new Put((Put) m));
             }
         }
     }
 
     /**
-     * * Prepares data row current and next row states
+     * * Prepares next data row state
      */
     private void prepareDataRowStates(ObserverContext<RegionCoprocessorEnvironment> c,
                                       MiniBatchOperationInProgress<Mutation> miniBatchOp,
@@ -635,8 +765,6 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
         if (context.rowsToLock.size() == 0) {
             return;
         }
-        // Retrieve the current row states from the data table
-        getCurrentRowStates(c, context);
         applyPendingPutMutations(miniBatchOp, context, now);
         applyPendingDeleteMutations(miniBatchOp, context);
     }
@@ -681,6 +809,10 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
             localUpdates.add(next.getFirst());
         }
         if (!localUpdates.isEmpty()) {
+            Mutation[] mutationsAddedByCP = miniBatchOp.getOperationsFromCoprocessors(0);
+            if (mutationsAddedByCP != null) {
+                localUpdates.addAll(Arrays.asList(mutationsAddedByCP));
+            }
             miniBatchOp.addOperationsFromCP(0, localUpdates.toArray(new Mutation[localUpdates.size()]));
         }
     }
@@ -954,7 +1086,6 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
 
     public void preBatchMutateWithExceptions(ObserverContext<RegionCoprocessorEnvironment> c,
                                              MiniBatchOperationInProgress<Mutation> miniBatchOp) throws Throwable {
-        ignoreAtomicOperations(miniBatchOp);
         PhoenixIndexMetaData indexMetaData = getPhoenixIndexMetaData(c, miniBatchOp);
         BatchMutateContext context = new BatchMutateContext(indexMetaData.getClientVersion());
         setBatchMutateContext(c, context);
@@ -973,6 +1104,20 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
             return;
         }
         lockRows(context);
+
+        /*
+         * Retrieve the current row states from the data table while holding the lock.
+         * This is needed for both atomic mutations and global indexes
+         */
+        getCurrentRowStates(c, context);
+        addOnDupMutationsToBatch(miniBatchOp, context);
+        // release locks for ON DUPLICATE KEY IGNORE since we won't be changing those rows
+        releaseLocksForOnDupIgnoreMutations(miniBatchOp, context);
+        // early exit if we are not changing any rows
+        if (context.rowsToLock.isEmpty()) {
+            return;
+        }
+
         long now = EnvironmentEdgeManager.currentTimeMillis();
         // Update the timestamps of the data table mutations to prevent overlapping timestamps (which prevents index
         // inconsistencies as this case isn't handled correctly currently).
@@ -980,7 +1125,7 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
 
         TableName table = c.getEnvironment().getRegion().getRegionInfo().getTable();
         if (hasGlobalIndex(indexMetaData)) {
-            // Prepare current and next data rows states for pending mutations (for global indexes)
+            // Prepare next data rows states for pending mutations (for global indexes)
             prepareDataRowStates(c, miniBatchOp, context, now);
             // Add the table rows in the mini batch to the collection of pending rows. This will be used to detect
             // concurrent updates
@@ -1015,6 +1160,35 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
         }
         if (failDataTableUpdatesForTesting) {
             throw new DoNotRetryIOException("Simulating the data table write failure");
+        }
+    }
+
+    /**
+     * In case of ON DUPLICATE KEY IGNORE, if the row already exists no mutations will be
+     * generated so release the row lock.
+     */
+    private void releaseLocksForOnDupIgnoreMutations(MiniBatchOperationInProgress<Mutation> miniBatchOp,
+                                                     BatchMutateContext context) {
+        for (int i = 0; i < miniBatchOp.size(); i++) {
+            if (miniBatchOp.getOperationStatus(i) != IGNORE) {
+                continue;
+            }
+            Mutation m = miniBatchOp.getOperation(i);
+            if (!this.builder.isAtomicOp(m)) {
+                continue;
+            }
+            ImmutableBytesPtr row = new ImmutableBytesPtr(m.getRow());
+            Iterator<RowLock> rowLockIterator = context.rowLocks.iterator();
+            while(rowLockIterator.hasNext()){
+                RowLock rowLock = rowLockIterator.next();
+                ImmutableBytesPtr rowKey = rowLock.getRowKey();
+                if (row.equals(rowKey)) {
+                    rowLock.release();
+                    rowLockIterator.remove();
+                    context.rowsToLock.remove(row);
+                    break;
+                }
+            }
         }
     }
 
@@ -1205,5 +1379,220 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
       properties.put(IndexRegionObserver.INDEX_BUILDER_CONF_KEY, builder.getName());
       desc.addCoprocessor(IndexRegionObserver.class.getName(), null, priority, properties);
   }
-}
 
+  private List<Mutation> generateOnDupMutations(BatchMutateContext context, Put atomicPut) throws IOException {
+      List<Mutation> mutations = Lists.newArrayListWithExpectedSize(2);
+      byte[] opBytes = atomicPut.getAttribute(ATOMIC_OP_ATTRIB);
+      if (opBytes == null) { // Unexpected
+          return null;
+      }
+      Put put = null;
+      Delete delete = null;
+      // We cannot neither use the time stamp in the Increment to set the Get time range
+      // nor set the Put/Delete time stamp and have this be atomic as HBase does not
+      // handle that. Though we disallow using ON DUPLICATE KEY clause when the
+      // CURRENT_SCN is set, we still may have a time stamp set as of when the table
+      // was resolved on the client side. We need to ignore this as well due to limitations
+      // in HBase, but this isn't too bad as the time will be very close the the current
+      // time anyway.
+      long ts = HConstants.LATEST_TIMESTAMP;
+
+      byte[] rowKey = atomicPut.getRow();
+      ImmutableBytesPtr rowKeyPtr = new ImmutableBytesPtr(rowKey);
+      // Get the latest data row state
+      Pair<Put, Put> dataRowState = context.dataRowStates.get(rowKeyPtr);
+      Put currentDataRowState = dataRowState != null ? dataRowState.getFirst() : null;
+      LOG.info("Dumping current data row");
+      logMutation(currentDataRowState);
+
+      if (PhoenixIndexBuilder.isDupKeyIgnore(opBytes)) {
+          if (currentDataRowState == null) {
+              // new row
+              mutations.add(atomicPut);
+          }
+          return mutations;
+      }
+
+      ByteArrayInputStream stream = new ByteArrayInputStream(opBytes);
+      DataInputStream input = new DataInputStream(stream);
+      boolean skipFirstOp = input.readBoolean();
+      short repeat = input.readShort();
+      final int[] estimatedSizeHolder = {0};
+      List<Pair<PTable, List<Expression>>> operations = Lists.newArrayListWithExpectedSize(3);
+
+      // Get below is used to store the columns that need to be read in the conditional expressions
+      // This Get is applied to the current data row state to read the column values
+      final Get get = new Get(rowKey);
+      while (true) {
+          ExpressionVisitor<Void> visitor = new StatelessTraverseAllExpressionVisitor<Void>() {
+              @Override
+              public Void visit(KeyValueColumnExpression expression) {
+                  get.addColumn(expression.getColumnFamily(), expression.getColumnQualifier());
+                  estimatedSizeHolder[0]++;
+                  return null;
+              }
+          };
+          try {
+              int nExpressions = WritableUtils.readVInt(input);
+              List<Expression> expressions = Lists.newArrayListWithExpectedSize(nExpressions);
+              for (int i = 0; i < nExpressions; i++) {
+                  Expression expression = ExpressionType.values()[WritableUtils.readVInt(input)].newInstance();
+                  expression.readFields(input);
+                  expressions.add(expression);
+                  expression.accept(visitor);
+              }
+              PTableProtos.PTable tableProto = PTableProtos.PTable.parseDelimitedFrom(input);
+              PTable table = PTableImpl.createFromProto(tableProto);
+              operations.add(new Pair<>(table, expressions));
+          } catch (EOFException e) {
+              break;
+          }
+      }
+      int estimatedSize = estimatedSizeHolder[0];
+      if (get.getFamilyMap().isEmpty()) {
+          get.setFilter(new FirstKeyOnlyFilter());
+      }
+      MultiKeyValueTuple tuple;
+      List<Cell> flattenedCells = null;
+
+      // read the column values requested in the get from the current data row
+      List<Cell> cells = readColumnsFromRow(currentDataRowState, get);
+      LOG.info("Dumping filtered cells");
+      logCellList(cells);
+
+      // cell list is empty if the row doesn't exist or all the columns requested in get are null
+      if (cells.isEmpty()) {
+          if (skipFirstOp) {
+              if (operations.size() <= 1 && repeat <= 1) {
+                  mutations.add(atomicPut);
+                  return mutations;
+              }
+              repeat--; // Skip first operation (if first wasn't ON DUPLICATE KEY IGNORE)
+          }
+          // Base current state off of new row
+          flattenedCells = flattenCells(atomicPut);
+          tuple = new MultiKeyValueTuple(flattenedCells);
+      } else {
+          // Base current state off of existing row
+          tuple = new MultiKeyValueTuple(cells);
+      }
+      ImmutableBytesWritable ptr = new ImmutableBytesWritable();
+      for (int opIndex = 0; opIndex < operations.size(); opIndex++) {
+          Pair<PTable, List<Expression>> operation = operations.get(opIndex);
+          PTable table = operation.getFirst();
+          List<Expression> expressions = operation.getSecond();
+          for (int j = 0; j < repeat; j++) { // repeater loop
+              ptr.set(rowKey);
+              // Sort the list of cells (if they've been flattened in which case they're not necessarily
+              // ordered correctly). We only need the list sorted if the expressions are going to be
+              // executed, not when the outer loop is exited. Hence we do it here, at the top of the loop.
+              if (flattenedCells != null) {
+                  Collections.sort(flattenedCells, KeyValue.COMPARATOR);
+              }
+              PRow row = table.newRow(GenericKeyValueBuilder.INSTANCE, ts, ptr, false);
+              int adjust = table.getBucketNum() == null ? 1 : 2;
+              for (int i = 0; i < expressions.size(); i++) {
+                  Expression expression = expressions.get(i);
+                  ptr.set(ByteUtil.EMPTY_BYTE_ARRAY);
+                  expression.evaluate(tuple, ptr);
+                  PColumn column = table.getColumns().get(i + adjust);
+                  Object value = expression.getDataType().toObject(ptr, column.getSortOrder());
+                  System.out.println(String.format("column: %s value: %s", column.getName().getString(), value != null ? value.toString() : "null"));
+                  // We are guaranteed that the two column will have the
+                  // same type.
+                  if (!column.getDataType().isSizeCompatible(ptr, value, column.getDataType(),
+                      expression.getSortOrder(), expression.getMaxLength(), expression.getScale(),
+                      column.getMaxLength(), column.getScale())) {
+                      throw new DataExceedsCapacityException(column.getDataType(), column.getMaxLength(),
+                          column.getScale(), column.getName().getString());
+                  }
+                  column.getDataType().coerceBytes(ptr, value, expression.getDataType(), expression.getMaxLength(),
+                      expression.getScale(), expression.getSortOrder(), column.getMaxLength(), column.getScale(),
+                      column.getSortOrder(), table.rowKeyOrderOptimizable());
+                  byte[] bytes = ByteUtil.copyKeyBytesIfNecessary(ptr);
+                  row.setValue(column, bytes);
+              }
+              flattenedCells = Lists.newArrayListWithExpectedSize(estimatedSize);
+              List<Mutation> newMutations = row.toRowMutations();
+              for (Mutation source : newMutations) {
+                  flattenCells(source, flattenedCells);
+              }
+              tuple.setKeyValues(flattenedCells);
+          }
+          // Repeat only applies to first statement
+          repeat = 1;
+      }
+
+      for (int i = 0; i < tuple.size(); i++) {
+          Cell cell = tuple.getValue(i);
+          if (Type.codeToType(cell.getTypeByte()) == Type.Put) {
+              if (put == null) {
+                  put = new Put(rowKey);
+                  transferAttributes(atomicPut, put);
+                  mutations.add(put);
+              }
+              put.add(cell);
+          } else {
+              if (delete == null) {
+                  delete = new Delete(rowKey);
+                  transferAttributes(atomicPut, delete);
+                  mutations.add(delete);
+              }
+              delete.addDeleteMarker(cell);
+          }
+      }
+      return mutations;
+  }
+
+    private List<Cell> readColumnsFromRow(Put currentDataRow, Get get) {
+        if (currentDataRow == null) {
+            return Collections.EMPTY_LIST;
+        }
+
+        List<Cell> columnValues = Lists.newArrayList();
+        Map<byte[], NavigableSet<byte[]>> familyMap = get.getFamilyMap();
+
+        // just return any cell FirstKeyOnlyFilter
+        if (familyMap.isEmpty()) {
+            for (List<Cell> cells : currentDataRow.getFamilyCellMap().values()) {
+                if (cells == null || cells.isEmpty()) {
+                    continue;
+                }
+                columnValues.add(cells.get(0));
+                break;
+            }
+            return columnValues;
+        }
+
+        for (Map.Entry<byte [], NavigableSet<byte[]>> entry : familyMap.entrySet()) {
+            if (entry.getValue() == null) {
+                continue;
+            }
+            for (byte [] column : entry.getValue()) {
+                List<Cell> cells = currentDataRow.get(entry.getKey(), column);
+                if (cells != null && !cells.isEmpty()) {
+                    columnValues.add(cells.get(0));
+                }
+            }
+        }
+        return columnValues;
+    }
+
+    private static List<Cell> flattenCells(Mutation m) {
+        List<Cell> flattenedCells = new ArrayList<>();
+        flattenCells(m, flattenedCells);
+        return flattenedCells;
+    }
+
+    private static void flattenCells(Mutation m, List<Cell> flattenedCells) {
+        for (List<Cell> cells : m.getFamilyCellMap().values()) {
+            flattenedCells.addAll(cells);
+        }
+    }
+
+    private static void transferAttributes(Mutation source, Mutation target) {
+        for (Map.Entry<String, byte[]> entry : source.getAttributesMap().entrySet()) {
+            target.setAttribute(entry.getKey(), entry.getValue());
+        }
+    }
+}
