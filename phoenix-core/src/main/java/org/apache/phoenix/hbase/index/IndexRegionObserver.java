@@ -1019,8 +1019,8 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
                 }
             }
         }
-        removePendingRows(context);
-        context.indexUpdates.clear();
+        //removePendingRows(context);
+        //context.indexUpdates.clear();
     }
 
     private static boolean hasGlobalIndex(PhoenixIndexMetaData indexMetaData) {
@@ -1048,10 +1048,7 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
         done = true;
         for (BatchMutateContext lastContext : context.lastConcurrentBatchContext.values()) {
             phase = lastContext.getCurrentPhase();
-            if (phase == BatchMutatePhase.FAILED) {
-                done = false;
-                break;
-            }
+
             if (phase == BatchMutatePhase.PRE) {
                 CountDownLatch countDownLatch = lastContext.getCountDownLatch();
                 // Release the locks so that the previous concurrent mutation can go into the post phase
@@ -1060,23 +1057,30 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
                 // lastContext.getMaxPendingRowCount() is the depth of the subtree rooted at the batch pointed by lastContext
                 if (!countDownLatch.await((lastContext.getMaxPendingRowCount() + 1) * concurrentMutationWaitDuration,
                         TimeUnit.MILLISECONDS)) {
+                    LOG.debug(String.format("latch timeout context %s last %s", context, lastContext));
                     done = false;
-                    break;
                 }
                 // Acquire the locks again before letting the region proceed with data table updates
                 lockRows(context);
+                if (!done) {
+                    // previous concurrent batch did not complete so we have to retry this batch
+                    break;
+                } else {
+                    // read the phase again to determine the status of previous batch
+                    phase = lastContext.getCurrentPhase();
+                    LOG.debug(String.format("context %s last %s exit phase %s", context, lastContext, phase));
+                }
+            }
+
+            if (phase == BatchMutatePhase.FAILED) {
+                done = false;
+                break;
             }
         }
         if (!done) {
             // This batch needs to be retried since one of the previous concurrent batches has not completed yet.
-            // Throwing an IOException will result in retries of this batch. Before throwing exception,
-            // we need to remove reference counts and locks for the rows of this batch
-            removePendingRows(context);
-            context.indexUpdates.clear();
-            for (RowLock rowLock : context.rowLocks) {
-                rowLock.release();
-            }
-            context.rowLocks.clear();
+            // Throwing an IOException will result in retries of this batch. Removal of reference counts and
+            // locks for the rows of this batch will be done in postBatchMutateIndispensably()
             throw new IOException("One of the previous concurrent mutations has not completed. " +
                     "The batch needs to be retried " + table.getNameAsString());
         }
@@ -1247,6 +1251,11 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
         }
     }
 
+    /**
+     * When this hook is called, all the rows in the batch context are locked. Because the rows
+     * are locked, we can safely make updates to the context object and perform the necessary
+     * cleanup.
+     */
   @Override
   public void postBatchMutateIndispensably(ObserverContext<RegionCoprocessorEnvironment> c,
       MiniBatchOperationInProgress<Mutation> miniBatchOp, final boolean success) throws IOException {
@@ -1267,6 +1276,10 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
               for (CountDownLatch countDownLatch : context.waitList) {
                   countDownLatch.countDown();
               }
+          }
+          removePendingRows(context);
+          if (context.indexUpdates != null) {
+              context.indexUpdates.clear();
           }
           unlockRows(context);
           this.builder.batchCompleted(miniBatchOp);
@@ -1350,10 +1363,10 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
           metricSource.updatePreIndexUpdateFailureTime(dataTableName,
               EnvironmentEdgeManager.currentTimeMillis() - start);
           metricSource.incrementPreIndexUpdateFailures(dataTableName);
-          // Remove all locks as they are already unlocked. There is no need to unlock them again later when
-          // postBatchMutateIndispensably() is called
-          removePendingRows(context);
-          context.rowLocks.clear();
+          // Re-acquire all locks since we released them before making index updates
+          // Removal of reference counts and ocks for the rows of this batch will be
+          // done in postBatchMutateIndispensably()
+          lockRows(context);
           rethrowIndexingException(e);
       }
       throw new RuntimeException(
