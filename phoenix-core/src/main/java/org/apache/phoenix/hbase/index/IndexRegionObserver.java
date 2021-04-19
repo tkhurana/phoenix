@@ -523,21 +523,21 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
       }
   }
 
-  private void logMutations(List<Mutation> mutations) {
+  /*private void logMutations(List<Mutation> mutations) {
       for (Mutation m : mutations) {
           logMutation(m);
       }
-  }
+  }*/
 
-  private void logCellList(List<Cell> cellList) {
+  /*private void logCellList(List<Cell> cellList) {
       for (Cell cell : cellList) {
           LOG.info(cell + "column= " +
               Bytes.toString(CellUtil.cloneQualifier(cell)) +
               " val=" + Bytes.toStringBinary(CellUtil.cloneValue(cell)));
       }
-  }
+  }*/
 
-  private void logMutation(Mutation m) {
+  /*private void logMutation(Mutation m) {
       if (m == null) {
           LOG.info("null mutation");
           return;
@@ -547,7 +547,7 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
           logCellList(cellList);
       }
       LOG.info("-----------------------------------------------");
-  }
+  }*/
 
   private void addOnDupMutationsToBatch(MiniBatchOperationInProgress<Mutation> miniBatchOp,
                                         BatchMutateContext context) throws IOException {
@@ -555,8 +555,6 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
           Mutation m = miniBatchOp.getOperation(i);
           if (this.builder.isAtomicOp(m) && m instanceof Put) {
               List<Mutation> mutations = generateOnDupMutations(context, (Put)m);
-              LOG.info("Dumping generated on dup mutations");
-              logMutations(mutations);
               if (!mutations.isEmpty()) {
                   addOnDupMutationsToBatch(miniBatchOp, i, mutations);
               } else {
@@ -1402,8 +1400,6 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
       // Get the latest data row state
       Pair<Put, Put> dataRowState = context.dataRowStates.get(rowKeyPtr);
       Put currentDataRowState = dataRowState != null ? dataRowState.getFirst() : null;
-      LOG.info("Dumping current data row");
-      logMutation(currentDataRowState);
 
       if (PhoenixIndexBuilder.isDupKeyIgnore(opBytes)) {
           if (currentDataRowState == null) {
@@ -1457,8 +1453,6 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
 
       // read the column values requested in the get from the current data row
       List<Cell> cells = readColumnsFromRow(currentDataRowState, get);
-      LOG.info("Dumping filtered cells");
-      logCellList(cells);
 
       // cell list is empty if the row doesn't exist or all the columns requested in get are null
       if (cells.isEmpty()) {
@@ -1497,7 +1491,6 @@ public class IndexRegionObserver extends CompatIndexRegionObserver {
                   expression.evaluate(tuple, ptr);
                   PColumn column = table.getColumns().get(i + adjust);
                   Object value = expression.getDataType().toObject(ptr, column.getSortOrder());
-                  System.out.println(String.format("column: %s value: %s", column.getName().getString(), value != null ? value.toString() : "null"));
                   // We are guaranteed that the two column will have the
                   // same type.
                   if (!column.getDataType().isSizeCompatible(ptr, value, column.getDataType(),
