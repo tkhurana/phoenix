@@ -32,8 +32,6 @@ import java.util.NoSuchElementException;
 import java.util.Set;
 
 import org.apache.hadoop.hbase.CompareOperator;
-import org.apache.phoenix.expression.DelegateExpression;
-import org.apache.phoenix.schema.ValueSchema;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.thirdparty.com.google.common.base.Optional;
@@ -153,6 +151,8 @@ public class WhereOptimizer {
             // instead of an array of slots for the corresponding column. Change the behavior so it
             // becomes consistent.
             keySlots = whereClause.accept(visitor);
+            KeySpaceExpressionVisitor ksv = new KeySpaceExpressionVisitor(context, table);
+            KeySpaces keySpace = whereClause.accept(ksv);
 
             if (keySlots == null && (tenantId == null || !table.isMultiTenant()) && table.getViewIndexId() == null && !minOffset.isPresent()) {
                 context.setScanRanges(ScanRanges.EVERYTHING);
