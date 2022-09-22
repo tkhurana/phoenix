@@ -48,8 +48,8 @@ public class KeyRangeUnionTest extends TestCase {
         return Arrays.asList(new Object[][] {
                 {
                     PChar.INSTANCE.getKeyRange(toBytes("C"), true, toBytes("E"), true),
-                    PChar.INSTANCE.getKeyRange(toBytes("D"), true, toBytes("F"), true),
-                    PChar.INSTANCE.getKeyRange(toBytes("C"), true, toBytes("F"), true)
+                    PChar.INSTANCE.getKeyRange(toBytes("G"), true, toBytes("H"), true),
+                    PChar.INSTANCE.getKeyRange(toBytes("C"), true, toBytes("H"), true)
                 },
                 {
                     PChar.INSTANCE.getKeyRange(toBytes("C"), false, toBytes("E"), false),

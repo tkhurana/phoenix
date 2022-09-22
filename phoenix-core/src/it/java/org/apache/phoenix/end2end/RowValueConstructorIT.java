@@ -1734,6 +1734,27 @@ public class RowValueConstructorIT extends ParallelStatsDisabledIT {
         }
     }
 
+    @Test
+    public void testKeySlots() throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute("CREATE TABLE testfoo (\n"
+                + "PK1 INTEGER NOT NULL,\n" + "PK2 INTEGER NOT NULL,\n"
+                + "PK3 INTEGER NOT NULL,\n" + "OBJECT_VERSION VARCHAR,\n"
+                + "LOC VARCHAR,\n"
+                + "CONSTRAINT PK PRIMARY KEY (PK1, PK2, PK3))");
+            //String sql = "select * from testfoo where (PK1,  PK2) > (100, 25) AND (PK2 < 15)";
+            //String sql = "select * from testfoo where PK1 = 5 AND PK1 = 3";
+            //String sql = "select * from testfoo where PK1 > 5 AND PK1 < 7 AND PK2 > 2 AND PK2 < 15 AND PK3 = 20";
+            String sql = "select * from testfoo where PK1 > 5 AND PK1 < 7 OR PK1 > 11 AND PK1 < 15";
+            ResultSet rs = conn.createStatement().executeQuery(sql);
+            assertFalse(rs.next());
+            /*sql = "select * from testfoo where LOC = 'loc'";
+            rs = conn.createStatement().executeQuery(sql);
+            assertFalse(rs.next());
+             */
+        }
+    }
+
     private StringBuilder generateQueryToTest(int numItemsInClause, String fullViewName) {
         StringBuilder querySb =
                 new StringBuilder("SELECT OBJECT_ID,OBJECT_DATA2,OBJECT_DATA FROM " + fullViewName);

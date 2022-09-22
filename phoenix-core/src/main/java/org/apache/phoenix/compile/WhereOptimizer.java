@@ -147,7 +147,7 @@ public class WhereOptimizer {
             // becomes consistent.
             keySlots = whereClause.accept(visitor);
             KeySpaceExpressionVisitor ksv = new KeySpaceExpressionVisitor(context, table);
-            KeySpaces keySpace = whereClause.accept(ksv);
+            List<KeySpace> keyspaces = whereClause.accept(ksv);
 
             if (keySlots == null && (tenantId == null || !table.isMultiTenant()) && table.getViewIndexId() == null && !minOffset.isPresent()) {
                 context.setScanRanges(ScanRanges.EVERYTHING);
