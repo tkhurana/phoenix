@@ -40,13 +40,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.math.BigDecimal;
-import java.sql.Connection;
-import java.sql.Date;
-import java.sql.DriverManager;
-import java.sql.SQLException;
-import java.sql.Statement;
-import java.sql.Timestamp;
-import java.sql.Types;
+import java.sql.*;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
@@ -106,15 +100,7 @@ import org.apache.phoenix.query.BaseConnectionlessQueryTest;
 import org.apache.phoenix.query.KeyRange;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Sets;
-import org.apache.phoenix.util.ByteUtil;
-import org.apache.phoenix.util.DateUtil;
-import org.apache.phoenix.util.EncodedColumnsUtil;
-import org.apache.phoenix.util.PhoenixRuntime;
-import org.apache.phoenix.util.PropertiesUtil;
-import org.apache.phoenix.util.ScanUtil;
-import org.apache.phoenix.util.SchemaUtil;
-import org.apache.phoenix.util.StringUtil;
-import org.apache.phoenix.util.TestUtil;
+import org.apache.phoenix.util.*;
 import org.junit.Test;
 
 public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
@@ -3538,6 +3524,30 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                         expectedExtractedNodes, extractedNodes.size());
             }
 
+        }
+    }
+
+    @Test
+    public void testLargeKeyRange() throws SQLException {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String tableName = generateUniqueName();
+            String ddl = String.format("CREATE TABLE %s (" +
+                    "PK1 INTEGER NOT NULL, " +
+                    "PK2 INTEGER NOT NULL, " +
+                    "PK3 INTEGER NOT NULL, " +
+                    "VAL1 varchar, " +
+                    "VAL2 varchar " +
+                    "CONSTRAINT PK PRIMARY KEY (PK1, PK2, PK3)" +
+                    ")", tableName);
+            conn.createStatement().execute(ddl);
+            conn.commit();
+
+            QueryPlan queryPlan = null;
+            String dql = String.format("SELECT * FROM %s " +
+                    "WHERE (PK1, PK2) > (100, 25) AND PK3 = 5", tableName);
+            queryPlan = TestUtil.getOptimizeQueryPlan(conn, dql);
+            String explainPlan = QueryUtil.getExplainPlan(queryPlan.iterator());
+            System.out.println(explainPlan);
         }
     }
 
