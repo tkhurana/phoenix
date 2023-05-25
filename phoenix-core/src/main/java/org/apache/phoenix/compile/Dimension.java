@@ -1,39 +1,122 @@
 package org.apache.phoenix.compile;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.phoenix.schema.PColumn;
 
-import java.util.List;
+import java.util.EnumSet;
 
-public class DimensionInterval {
-    private byte[] lower;
-    private boolean lowerInclusive;
-    private byte[] upper;
-    private boolean upperInclusive;
+public class Dimension {
+    public static class Boundary {
+        enum Flags {
+            UNBOUND, // -inf, +inf
+            EXCLUSIVE // open interval (,)
+        }
+        private byte[] value;
+        private EnumSet<Flags> flags;
 
-    private static final byte[] UNBOUND = new byte[0];
-    private static final byte[] DEGENERATE_KEY = new byte[] {1};
+        public Boundary () {
+            flags = EnumSet.of(Flags.UNBOUND, Flags.EXCLUSIVE);
+        }
 
+        public Boundary (byte[] value, boolean inclusive) {
+            this.value = value;
+            this.flags = EnumSet.noneOf(Flags.class);
+            if (!inclusive) {
+                flags.add(Flags.EXCLUSIVE);
+            }
+        }
+
+        public boolean isUnbound() {
+            return flags.contains(Flags.UNBOUND);
+        }
+
+        public boolean isExclusive() {
+            return flags.contains(Flags.EXCLUSIVE);
+        }
+
+        public void bound(byte[] value) {
+            this.value = value;
+            flags.remove(Flags.UNBOUND);
+        }
+    }
+    PColumn pkColumn;
+    Boundary lower, upper;
+
+    public Dimension(PColumn pkCol) {
+        this.pkColumn = pkCol;
+        this.lower = new Boundary();
+        this.upper = new Boundary();
+    }
+
+    public Dimension(PColumn pkCol, Boundary lower, Boundary upper) {
+        this.pkColumn = pkCol;
+        this.lower = lower;
+        this.upper = upper;
+    }
+
+    public static Dimension create(PColumn pkCol, byte[] key, CompareOperator op) {
+        Boundary lower, upper;
+        switch (op) {
+            case EQUAL:
+                lower = new Boundary(key, true);
+                upper = new Boundary(key, true);
+                break;
+            case GREATER:
+                lower = new Boundary(key, false);
+                upper = new Boundary();
+                break;
+            case GREATER_OR_EQUAL:
+                lower = new Boundary(key, true);
+                upper = new Boundary();
+                break;
+            case LESS:
+                lower = new Boundary();
+                upper = new Boundary(key , false);
+                break;
+            case LESS_OR_EQUAL:
+                lower = new Boundary();
+                upper = new Boundary(key , true);
+                break;
+            default:
+                throw new IllegalArgumentException("Unknown operator " + op);
+        }
+        return new Dimension(pkCol, lower, upper);
+    }
+
+    public boolean isLowerUnbound() {
+        return lower.isUnbound();
+    }
+
+    public boolean isUpperUnbound() {
+        return upper.isUnbound();
+    }
+
+    @Override
+    public String toString() {
+        return (lower.isExclusive() ? "(" : "[") +
+                (isLowerUnbound() ? "*" : Bytes.toStringBinary(lower.value)) + " - " +
+                (isUpperUnbound() ? "*" : Bytes.toStringBinary(upper.value)) +
+                (upper.isExclusive() ? ")" : "]" );
+    }
     /**
      * KeyInterval that encompasses all values for a key space
      * Boolean equivalent to 1
      */
-    public static final DimensionInterval UNIVERSAL = new DimensionInterval(UNBOUND, false, UNBOUND, false);
+    //public static final Dimension UNIVERSAL = new Dimension(UNBOUND, false, UNBOUND, false);
 
     /**
      * KeyInterval that represents an empty interval
      * Boolean equivalent to 0
      */
-    public static final DimensionInterval EMPTY = new DimensionInterval(DEGENERATE_KEY, false, DEGENERATE_KEY, false);
+    //public static final Dimension EMPTY = new Dimension(DEGENERATE_KEY, false, DEGENERATE_KEY, false);
 
     /**
      * @return -1 if lower < upper
      *          1 if lower > upper or  lower = upper and lower inclusive != upper inclusive
      *          0 lower = upper and lower inclusive = upper inclusive
      */
-    public static int compareLowerToUpper(byte[] lower, boolean lowerInclusive, byte[] upper, boolean upperInclusive) {
+    /*public static int compareLowerToUpper(byte[] lower, boolean lowerInclusive, byte[] upper, boolean upperInclusive) {
         if (isUnbound(lower) || isUnbound(upper)) {
             return -1;
         }
@@ -48,38 +131,38 @@ public class DimensionInterval {
             // lower == upper
             return lowerInclusive == upperInclusive ? 0 : 1;
         }
-    }
+    }*/
 
-    public static boolean isValid(byte[] lower, boolean lowerInclusive, byte[] upper, boolean upperInclusive) {
+    /*public static boolean isValid(byte[] lower, boolean lowerInclusive, byte[] upper, boolean upperInclusive) {
         return compareLowerToUpper(lower, lowerInclusive, upper, upperInclusive) <= 0;
-    }
+    }*/
 
-    public DimensionInterval(byte[] lower, boolean lowerInclusive, byte[] upper, boolean upperInclusive) {
+    /*public Dimension(byte[] lower, boolean lowerInclusive, byte[] upper, boolean upperInclusive) {
         Preconditions.checkArgument(isValid(lower, lowerInclusive, upper, upperInclusive));
         this.lower = lower;
         this.lowerInclusive = lowerInclusive;
         this.upper = upper;
         this.upperInclusive = upperInclusive;
-    }
+    }*/
 
-    public static DimensionInterval getKeyInterval(byte[] key, CompareOp op) {
+    /*public static Dimension getKeyInterval(byte[] key, CompareOp op) {
         switch (op) {
             case EQUAL:
-                return new DimensionInterval(key, true, key, true);
+                return new Dimension(key, true, key, true);
             case GREATER:
-                return new DimensionInterval(key, false, UNBOUND, false);
+                return new Dimension(key, false, UNBOUND, false);
             case GREATER_OR_EQUAL:
-                return new DimensionInterval(key, true, UNBOUND, false);
+                return new Dimension(key, true, UNBOUND, false);
             case LESS:
-                return new DimensionInterval(UNBOUND, false, key, false);
+                return new Dimension(UNBOUND, false, key, false);
             case LESS_OR_EQUAL:
-                return new DimensionInterval(UNBOUND, false, key, true);
+                return new Dimension(UNBOUND, false, key, true);
             default:
                 throw new IllegalArgumentException("Unknown operator " + op);
         }
-    }
+    }*/
 
-    public static DimensionInterval and(DimensionInterval lhs, DimensionInterval rhs) {
+    /*public static Dimension and(Dimension lhs, Dimension rhs) {
         byte[] newLower;
         byte[] newUpper;
         boolean newLowerInclusive;
@@ -133,13 +216,13 @@ public class DimensionInterval {
             }
         }
 
-        DimensionInterval result = new DimensionInterval(newLower, newLowerInclusive, newUpper, newUpperInclusive);
+        Dimension result = new Dimension(newLower, newLowerInclusive, newUpper, newUpperInclusive);
         return result.isValid() ? result : EMPTY;
-    }
+    }*/
 
-    public static List<DimensionInterval> or (DimensionInterval lhs, DimensionInterval rhs) {
+    /*public static List<Dimension> or (Dimension lhs, Dimension rhs) {
         // Both lhs and rhs are valid by definition
-        List<DimensionInterval> result = Lists.newArrayList();
+        List<Dimension> result = Lists.newArrayList();
 
         int cmp1 = compareLowerToUpper(lhs.lower, lhs.lowerInclusive, rhs.upper, rhs.upperInclusive);
         int cmp2 = compareLowerToUpper(rhs.lower, rhs.lowerInclusive, lhs.upper, lhs.upperInclusive);
@@ -155,10 +238,10 @@ public class DimensionInterval {
         }
 
         return result;
-    }
+    }*/
 
     // Assumes the intervals overlap
-    private static DimensionInterval mergeOverlapping(DimensionInterval lhs, DimensionInterval rhs) {
+    /*private static Dimension mergeOverlapping(Dimension lhs, Dimension rhs) {
         byte[] newLower;
         byte[] newUpper;
         boolean newLowerInclusive;
@@ -214,10 +297,10 @@ public class DimensionInterval {
             }
         }
 
-        return new DimensionInterval(newLower, newLowerInclusive, newUpper, newUpperInclusive);
-    }
+        return new Dimension(newLower, newLowerInclusive, newUpper, newUpperInclusive);
+    } */
 
-    public boolean isValid() {
+    /*public boolean isValid() {
         return isValid(lower, lowerInclusive, upper, upperInclusive);
     }
 
@@ -227,47 +310,5 @@ public class DimensionInterval {
 
     public boolean isEmpty() {
         return isLowerDegenerate() && isUpperDegenerate();
-    }
-
-    @Override
-    public String toString() {
-        return (lowerInclusive ? "[" :
-            "(") + (isLowerUnbound() ? "*" :
-            Bytes.toStringBinary(lower)) + " - " + (isUpperUnbound() ? "*" :
-            Bytes.toStringBinary(upper)) + (upperInclusive ? "]" : ")" );
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (!(o instanceof DimensionInterval)) {
-            return false;
-        }
-        DimensionInterval rhs = (DimensionInterval) o;
-        return Bytes.compareTo(this.lower, rhs.lower) == 0 && this.lowerInclusive == rhs.lowerInclusive &&
-            Bytes.compareTo(this.upper, rhs.upper) == 0 && this.upperInclusive == rhs.upperInclusive;
-    }
-
-    public static boolean isUnbound(byte[] value) {
-        return value == UNBOUND;
-    }
-
-    public static boolean isDegenerate(byte[] value) {
-        return value == DEGENERATE_KEY;
-    }
-
-    private boolean isLowerUnbound() {
-        return isUnbound(lower);
-    }
-
-    private boolean isUpperUnbound() {
-        return isUnbound(upper);
-    }
-
-    private boolean isLowerDegenerate() {
-        return isDegenerate(lower);
-    }
-
-    private boolean isUpperDegenerate() {
-        return isDegenerate(upper);
-    }
+    }*/
 }

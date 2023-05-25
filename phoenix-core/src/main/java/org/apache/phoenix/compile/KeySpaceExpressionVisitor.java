@@ -1,7 +1,7 @@
 package org.apache.phoenix.compile;
 
 import com.google.common.collect.Lists;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.phoenix.expression.AndExpression;
 import org.apache.phoenix.expression.ComparisonExpression;
@@ -13,8 +13,6 @@ import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.types.PDataType;
-import org.apache.phoenix.thirdparty.com.google.common.collect.ImmutableMap;
-import org.apache.phoenix.thirdparty.com.google.common.collect.Iterators;
 import org.apache.phoenix.util.ByteUtil;
 
 import java.util.BitSet;
@@ -37,35 +35,36 @@ public class KeySpaceExpressionVisitor extends StatelessTraverseNoExpressionVisi
 
     @Override
     public List<KeySpace> visit(RowKeyColumnExpression node) {
-        this.pkColsSeen.set(node.getPosition());
+        // nothing to do here
         return null;
     }
 
     @Override
     public Iterator<Expression> visitEnter(ComparisonExpression node) {
-        this.pkColsSeen.clear();
-        return Iterators.singletonIterator(node.getChildren().get(0));
+        // nothing to do here
+        return null;
+        //return Iterators.singletonIterator(node.getChildren().get(0));
     }
 
     @Override
     public List<KeySpace> visitLeave(ComparisonExpression node, List<List<KeySpace>> childKeySpace) {
+        KeySpace ks = new KeySpace(table.getPKColumns());
+        Expression lhs = node.getChildren().get(0);
         Expression rhs = node.getChildren().get(1);
-        int idx = pkColsSeen.nextSetBit(0);
-        KeySpace ks;
-        if (idx != -1) {
-            PColumn pkCol = table.getPKColumns().get(idx);
-            DimensionInterval interval = getKeyInterval(pkCol, node.getFilterOp(), rhs);
-            ks = new KeySpace(this.numPKCols, ImmutableMap.of(idx, interval));
+        if (lhs instanceof RowKeyColumnExpression) {
+            Dimension d = createDimension((RowKeyColumnExpression) lhs, rhs, node.getFilterOp());
+            ks.setDimension(((RowKeyColumnExpression) lhs).getPosition(), d);
         } else {
-            ks = KeySpace.getUniversalKeySpace(this.numPKCols);
+            throw new IllegalArgumentException("Unexpected expr " + lhs);
         }
-        this.pkColsSeen.clear();
         return Lists.newArrayList(ks);
     }
 
-    private DimensionInterval getKeyInterval(PColumn pkCol, CompareOp op, Expression rhs) {
+    private Dimension createDimension(RowKeyColumnExpression lhs, Expression rhs, CompareOperator op) {
         ImmutableBytesWritable ptr = new ImmutableBytesWritable();
         rhs.evaluate(null, ptr);
+        int pkPos = lhs.getPosition();
+        PColumn pkCol = table.getPKColumns().get(pkPos);
         // If the column is fixed width, fill is up to it's byte size
         PDataType type = pkCol.getDataType();
         if (type.isFixedWidth()) {
@@ -76,7 +75,7 @@ public class KeySpaceExpressionVisitor extends StatelessTraverseNoExpressionVisi
             }
         }
         byte[] key = ByteUtil.copyKeyBytesIfNecessary(ptr);
-        return DimensionInterval.getKeyInterval(key, op);
+        return Dimension.create(pkCol, key, op);
     }
 
     @Override
@@ -86,10 +85,11 @@ public class KeySpaceExpressionVisitor extends StatelessTraverseNoExpressionVisi
 
     @Override
     public List<KeySpace> visitLeave(AndExpression node, List<List<KeySpace>> children) {
-        List<KeySpace> result = Lists.newArrayList(KeySpace.getUniversalKeySpace(this.numPKCols));
+        List<KeySpace> result = null;
+        /*= Lists.newArrayList(KeySpace.getUniversalKeySpace(this.numPKCols));
         for (List<KeySpace> child : children) {
             result = KeySpace.and(result, child);
-        }
+        }*/
         return result;
     }
 
@@ -100,10 +100,11 @@ public class KeySpaceExpressionVisitor extends StatelessTraverseNoExpressionVisi
 
     @Override
     public List<KeySpace> visitLeave(OrExpression node, List<List<KeySpace>> children) {
-        List<KeySpace> result = Lists.newArrayList(KeySpace.getUniversalKeySpace(this.numPKCols));
+        List<KeySpace> result = null;
+        /*Lists.newArrayList(KeySpace.getUniversalKeySpace(this.numPKCols));
         for (List<KeySpace> child : children) {
             result = KeySpace.or(result, child);
-        }
+        }*/
         return result;
     }
 

@@ -3542,13 +3542,57 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
             conn.createStatement().execute(ddl);
             conn.commit();
 
-            QueryPlan queryPlan = null;
-            String dql = String.format("SELECT * FROM %s " +
-                    "WHERE (PK1, PK2) > (100, 25) AND PK3 = 5", tableName);
-            queryPlan = TestUtil.getOptimizeQueryPlan(conn, dql);
-            String explainPlan = QueryUtil.getExplainPlan(queryPlan.iterator());
-            System.out.println(explainPlan);
+            /*String dql = String.format("SELECT * FROM %s " +
+                    "WHERE (PK1, PK2) > (100, 25) AND PK3 < 5", tableName);*/
+            /*String dql = String.format("SELECT * FROM %s " +
+                    "WHERE (PK1, PK2) > (100, 25) ", tableName);*/
+            String queryFormat = "SELECT * FROM " + tableName + " WHERE %s";
+            String dql = null;
+            dql = String.format(queryFormat, "PK1 = 2");
+            dumpScanAndPlan(conn, dql);
+            /*dql = String.format(queryFormat, "PK1 = 2 AND PK2 > 4");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "PK1 > 2 AND PK1 < 5");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "PK1 = 5 AND PK2 < 8");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "(PK1,PK2) > (2,4) AND  (PK1, PK2) < (5, 8)");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "(PK1 = 5 AND PK2 > 10) OR " +
+                    "  (PK1 = 10 AND PK3 > 20) OR " +
+                    "  (PK1 = 8 AND PK2 = 19 AND (PK3 <= 10 OR PK3 > 15) ) OR " +
+                    "  (PK1 > 12 AND PK2 = 5)");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "(PK1 = 2 AND PK2 > 7) OR (PK1 = 3 AND PK2 > 5)");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "(PK1 = 2 OR PK1 = 3)");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "(PK1 = 2 OR PK1 = 5)"); // not contiguous
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "(PK1 = 2) AND ((PK2 >= 1 AND PK2 <= 4) OR (PK2 >= 3 AND PK2 <= 5))");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "(PK2 < 5 OR PK1 > 3)");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, "(PK2 < 5 AND PK1 > 3)");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, " (PK1 > 10 AND PK1 < 20) AND (PK2 > 100 AND PK2 < 200) ");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, " ((PK1 > 1 AND PK1 < 10) AND (PK2 > 1 AND PK2 < 10)) OR" +
+                    "((PK1 > 2 AND PK1 < 20) AND (PK2 > 4 AND PK2 < 20))");
+            dumpScanAndPlan(conn, dql);*/
+            /*dql = String.format(queryFormat, " (PK1 >=3) AND PK2 IN (4,9,11)");
+            dumpScanAndPlan(conn, dql);*/
         }
+    }
+
+    private void dumpScanAndPlan(Connection conn, String dql) throws SQLException {
+        System.out.println(dql);
+        QueryPlan queryPlan = null;
+        queryPlan = TestUtil.getOptimizeQueryPlan(conn, dql);
+        String explainPlan = QueryUtil.getExplainPlan(queryPlan.iterator());
+        System.out.println(explainPlan);
+        Scan s = queryPlan.getContext().getScan();
+        System.out.println(s);
     }
 
 }
