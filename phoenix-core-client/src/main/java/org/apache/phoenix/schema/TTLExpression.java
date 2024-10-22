@@ -17,11 +17,13 @@
  */
 package org.apache.phoenix.schema;
 
+import java.io.IOException;
 import java.sql.SQLException;
 import java.util.List;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.phoenix.expression.Expression;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.parse.CreateTableStatement;
@@ -70,5 +72,7 @@ public abstract class TTLExpression {
     abstract public void validateTTLOnAlter(PhoenixConnection connection, PTable table) throws SQLException;
 
     abstract public String getTTLForScanAttribute();
+
+    abstract public Expression compileTTLExpression(PhoenixConnection connection, PTable table) throws IOException;
 
 }

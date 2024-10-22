@@ -17,11 +17,13 @@
  */
 package org.apache.phoenix.schema;
 
+import java.io.IOException;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Objects;
 
 import org.apache.hadoop.hbase.Cell;
+import org.apache.phoenix.expression.Expression;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.parse.CreateTableStatement;
 import org.apache.phoenix.thirdparty.com.google.common.base.Preconditions;
@@ -79,6 +81,11 @@ public class LiteralTTLExpression extends TTLExpression {
             return null;
         }
         return getTTLExpression();
+    }
+
+    @Override
+    public Expression compileTTLExpression(PhoenixConnection connection, PTable table) throws IOException {
+        return null;
     }
 
     public int getTTLValue() {

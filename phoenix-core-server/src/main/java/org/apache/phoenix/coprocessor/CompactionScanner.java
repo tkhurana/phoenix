@@ -17,20 +17,37 @@
  */
 package org.apache.phoenix.coprocessor;
 
+import static org.apache.phoenix.coprocessor.CompactionScanner.MatcherType.GLOBAL_INDEXES;
+import static org.apache.phoenix.coprocessor.CompactionScanner.MatcherType.GLOBAL_VIEWS;
+import static org.apache.phoenix.coprocessor.CompactionScanner.MatcherType.TENANT_INDEXES;
+import static org.apache.phoenix.coprocessor.CompactionScanner.MatcherType.TENANT_VIEWS;
+import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CHILD_LINK_NAMESPACE_BYTES;
+import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CHILD_LINK_NAME_BYTES;
+import static org.apache.phoenix.query.QueryConstants.LOCAL_INDEX_COLUMN_FAMILY_PREFIX;
+import static org.apache.phoenix.query.QueryServices.PHOENIX_VIEW_TTL_TENANT_VIEWS_PER_SCAN_LIMIT;
+import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_PHOENIX_VIEW_TTL_TENANT_VIEWS_PER_SCAN_LIMIT;
+import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_FORVER;
+import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
+import static org.apache.phoenix.util.ByteUtil.EMPTY_BYTE_ARRAY;
+
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Iterator;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
@@ -51,7 +68,10 @@ import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.ScannerContext;
 import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.phoenix.coprocessorclient.RowKeyMatcher;
 import org.apache.phoenix.coprocessorclient.TableInfo;
+import org.apache.phoenix.coprocessorclient.TableTTLInfo;
+import org.apache.phoenix.coprocessorclient.TableTTLInfoCache;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.SQLExceptionInfo;
 import org.apache.phoenix.expression.RowKeyColumnExpression;
@@ -61,8 +81,12 @@ import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.IllegalDataException;
+import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.PNameFactory;
+import org.apache.phoenix.schema.PTable;
+import org.apache.phoenix.schema.PTableType;
+import org.apache.phoenix.schema.RowKeyValueAccessor;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.TTLExpression;
 import org.apache.phoenix.schema.types.PDataType;
@@ -72,41 +96,15 @@ import org.apache.phoenix.thirdparty.com.google.common.annotations.VisibleForTes
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.CDCUtil;
-import org.apache.phoenix.util.PhoenixRuntime;
-import org.apache.phoenix.coprocessorclient.RowKeyMatcher;
-import org.apache.phoenix.coprocessorclient.TableTTLInfoCache;
-import org.apache.phoenix.coprocessorclient.TableTTLInfo;
-import org.apache.phoenix.schema.PTableType;
-import org.apache.phoenix.schema.RowKeyValueAccessor;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.MetaDataUtil;
+import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ScanUtil;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.ViewUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static org.apache.phoenix.coprocessor.CompactionScanner.MatcherType.GLOBAL_INDEXES;
-import static org.apache.phoenix.coprocessor.CompactionScanner.MatcherType.GLOBAL_VIEWS;
-import static org.apache.phoenix.coprocessor.CompactionScanner.MatcherType.TENANT_INDEXES;
-import static org.apache.phoenix.coprocessor.CompactionScanner.MatcherType.TENANT_VIEWS;
-import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CHILD_LINK_NAMESPACE_BYTES;
-import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CHILD_LINK_NAME_BYTES;
-import static org.apache.phoenix.query.QueryConstants.LOCAL_INDEX_COLUMN_FAMILY_PREFIX;
-import static org.apache.phoenix.query.QueryServices.PHOENIX_VIEW_TTL_TENANT_VIEWS_PER_SCAN_LIMIT;
-import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_PHOENIX_VIEW_TTL_TENANT_VIEWS_PER_SCAN_LIMIT;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_FORVER;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
-import static org.apache.phoenix.util.ByteUtil.EMPTY_BYTE_ARRAY;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
-
-import org.apache.phoenix.schema.PColumn;
-import org.apache.phoenix.schema.PTable;
 
 /**
  * The store scanner that implements compaction for Phoenix. Phoenix coproc overrides the scan
@@ -231,7 +229,6 @@ public class CompactionScanner implements InternalScanner {
                 this.minVersion, this.maxVersion, this.keepDeletedCells.name(),
                 this.familyCount, this.localIndex, this.emptyCFStore,
                 compactionTime, maxLookbackWindowStart, maxLookbackInMillis, this.major));
-
     }
 
     @VisibleForTesting
@@ -270,11 +267,6 @@ public class CompactionScanner implements InternalScanner {
                     PHOENIX_VIEW_TTL_TENANT_VIEWS_PER_SCAN_LIMIT,
                     DEFAULT_PHOENIX_VIEW_TTL_TENANT_VIEWS_PER_SCAN_LIMIT);
         }
-        // If VIEW TTL is not enabled then return TTL tracker for base HBase tables.
-        // since TTL can be set only at the table level.
-        if (!isViewTTLEnabled) {
-            return new NonPartitionedTableTTLTracker(baseTable, store);
-        }
 
         long currentTime = EnvironmentEdgeManager.currentTimeMillis();
         String compactionTableName = env.getRegion().getRegionInfo().getTable().getNameAsString();
@@ -294,6 +286,12 @@ public class CompactionScanner implements InternalScanner {
         try (PhoenixConnection serverConnection = QueryUtil.getConnectionOnServer(new Properties(),
                 env.getConfiguration()).unwrap(PhoenixConnection.class)) {
 
+            // If VIEW TTL is not enabled then return TTL tracker for base HBase tables.
+            // since TTL can be set only at the table level.
+            if (!isViewTTLEnabled) {
+                return new NonPartitionedTableTTLTracker(serverConnection, baseTable, store);
+            }
+
             byte[] childLinkTableNameBytes = SchemaUtil.isNamespaceMappingEnabled(
                     PTableType.SYSTEM, env.getConfiguration()) ?
                     SYSTEM_CHILD_LINK_NAMESPACE_BYTES :
@@ -308,9 +306,9 @@ public class CompactionScanner implements InternalScanner {
                     currentTime);
 
             return isPartitioned ?
-                    new PartitionedTableTTLTracker(baseTable, isSalted, isSharedIndex,
+                    new PartitionedTableTTLTracker(serverConnection, baseTable, isSalted, isSharedIndex,
                             isLongViewIndexEnabled, viewTTLTenantViewsPerScanLimit) :
-                    new NonPartitionedTableTTLTracker(baseTable, store);
+                    new NonPartitionedTableTTLTracker(serverConnection, baseTable, store);
 
         } catch (SQLException e) {
             throw new IOException(e);
@@ -357,8 +355,9 @@ public class CompactionScanner implements InternalScanner {
             return false;
         }
     }
+
     /*
-    private void printRow(List<Cell> result, String title, boolean sort) {
+    private void printRow(List<Cell> result, String title, boolean sort, boolean output) {
         List<Cell> row;
         if (sort) {
             row = new ArrayList<>(result);
@@ -371,17 +370,13 @@ public class CompactionScanner implements InternalScanner {
                 + "compaction time: " + compactionTime);
         System.out.println("Max lookback window start time: " + maxLookbackWindowStart);
         System.out.println("Max lookback in ms: " + maxLookbackInMillis);
-        System.out.println("TTL in ms: " + ttlInMillis);
-        boolean maxLookbackLine = false;
-        boolean ttlLine = false;
+        if (output) {
+            RowContext rowContext = phoenixLevelRowCompactor.rowContext;
+            System.out.println("TTL in ms: " + rowContext.ttl);
+            System.out.println("TTL window start time: " + rowContext.ttlWindowStart);
+            System.out.println("Max lookback window start time: " + rowContext.maxLookbackWindowStartForRow);
+        }
         for (Cell cell : row) {
-            if (!maxLookbackLine && cell.getTimestamp() < maxLookbackWindowStart) {
-                System.out.println("-----> Max lookback window start time: " + maxLookbackWindowStart);
-                maxLookbackLine = true;
-            } else if (!ttlLine && cell.getTimestamp() < ttlWindowStart) {
-                System.out.println("-----> TTL window start time: " + ttlWindowStart);
-                ttlLine = true;
-            }
             System.out.println(cell);
         }
     }
@@ -392,10 +387,10 @@ public class CompactionScanner implements InternalScanner {
         boolean hasMore = storeScanner.next(result);
         inputCellCount += result.size();
         if (!result.isEmpty()) {
-            // printRow(result, "Input for " + tableName + " " + columnFamilyName, true); // This is for debugging
+            //printRow(result, "Input for " + tableName + " " + columnFamilyName, true, false); // This is for debugging
             phoenixLevelRowCompactor.compact(result, false);
             outputCellCount += result.size();
-            // printRow(result, "Output for " + tableName + " " + columnFamilyName, true); // This is for debugging
+            //printRow(result, "Output for " + tableName + " " + columnFamilyName, true, true); // This is for debugging
         }
         return hasMore;
     }
@@ -1217,8 +1212,9 @@ public class CompactionScanner implements InternalScanner {
         private TTLExpression ttl;
 
         public NonPartitionedTableTTLTracker(
+                PhoenixConnection pConn,
                 PTable pTable,
-                Store store) {
+                Store store) throws IOException {
 
             boolean isSystemTable = pTable.getType() == PTableType.SYSTEM;
             if (isSystemTable) {
@@ -1228,6 +1224,7 @@ public class CompactionScanner implements InternalScanner {
                 ttl = pTable.getTTL() != TTL_EXPRESSION_NOT_DEFINED ? pTable.getTTL() :
                         TTL_EXPRESSION_FORVER;
             }
+            ttl.compileTTLExpression(pConn, pTable);
             LOGGER.info(String.format(
                     "NonPartitionedTableTTLTracker params:- " +
                             "(physical-name=%s, ttl=%s, isSystemTable=%s)",
@@ -1259,6 +1256,7 @@ public class CompactionScanner implements InternalScanner {
         private PartitionedTableRowKeyMatcher tableRowKeyMatcher;
 
         public PartitionedTableTTLTracker(
+                PhoenixConnection pConn,
                 PTable table,
                 boolean isSalted,
                 boolean isSharedIndex,
@@ -1273,12 +1271,13 @@ public class CompactionScanner implements InternalScanner {
                                 isLongViewIndexEnabled, viewTTLTenantViewsPerScanLimit);
                 this.ttl = table.getTTL() != TTL_EXPRESSION_NOT_DEFINED ? table.getTTL() :
                         TTL_EXPRESSION_FORVER;
+                this.ttl.compileTTLExpression(pConn, table);
                 this.isSharedIndex = isSharedIndex || localIndex;
                 this.isLongViewIndexEnabled = isLongViewIndexEnabled;
                 this.isSalted = isSalted;
                 this.isMultiTenant = table.isMultiTenant();
 
-                this.startingPKPosition = getStartingPKPosition();;
+                this.startingPKPosition = getStartingPKPosition();
                 LOGGER.info(String.format(
                         "PartitionedTableTTLTracker params:- " + 
                                 "region-name = %s, table-name = %s,  " +
@@ -1719,14 +1718,13 @@ public class CompactionScanner implements InternalScanner {
         }
 
         public void setTTL(long ttlInSecs) {
-            this.ttl = ttlInSecs*1000;
+            this.ttl = Math.max(ttlInSecs*1000, maxLookbackInMillis + 1);
             this.ttlWindowStart = ttlInSecs == HConstants.FOREVER ? 1 : compactionTime - ttl ;
             this.maxLookbackWindowStartForRow = Math.max(ttlWindowStart, maxLookbackWindowStart);
             if (LOGGER.isTraceEnabled()) {
                 LOGGER.trace(String.format("RowContext:- (ttlWindowStart=%d, maxLookbackWindowStart=%d)",
                         ttlWindowStart, maxLookbackWindowStart));
             }
-
         }
         public long getTTL() {
             return ttl;
@@ -2451,6 +2449,7 @@ public class CompactionScanner implements InternalScanner {
                 previousCell = cell;
             }
         }
+
         /**
          * Compacts a single row at the Phoenix level. The result parameter is the input row and
          * modified to be the output of the compaction process.
@@ -2475,6 +2474,7 @@ public class CompactionScanner implements InternalScanner {
                 phoenixResult.clear();
                 compactRegionLevel(result, phoenixResult);
             }
+
             if (maxVersion == 1
                     && (!major
                         || (minVersion == 0 && keepDeletedCells == KeepDeletedCells.FALSE))) {
