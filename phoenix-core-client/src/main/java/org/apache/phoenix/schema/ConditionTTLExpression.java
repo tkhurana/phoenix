@@ -21,13 +21,17 @@ import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.DEFAULT_TTL;
 import static org.apache.phoenix.schema.PTable.ImmutableStorageScheme.ONE_CELL_PER_COLUMN;
 import static org.apache.phoenix.schema.PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS;
 
+import java.io.IOException;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.compile.ColumnResolver;
 import org.apache.phoenix.compile.ExpressionCompiler;
@@ -47,12 +51,14 @@ import org.apache.phoenix.parse.CreateTableStatement;
 import org.apache.phoenix.parse.ParseNode;
 import org.apache.phoenix.parse.SQLParser;
 import org.apache.phoenix.parse.TableName;
+import org.apache.phoenix.schema.tuple.MultiKeyValueTuple;
 import org.apache.phoenix.schema.types.PBoolean;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.util.SchemaUtil;
 
 public class ConditionTTLExpression extends TTLExpression {
     private final String ttlExpr;
+    private Expression conditionExpr;
 
     public ConditionTTLExpression(String ttlExpr) {
         this.ttlExpr = ttlExpr;
@@ -81,6 +87,27 @@ public class ConditionTTLExpression extends TTLExpression {
         return getTTLExpression();
     }
 
+    /**
+     * The cells of the row (i.e., result) read from HBase store are lexicographically ordered
+     * for tables using the key part of the cells which includes row, family, qualifier,
+     * timestamp and type. The cells belong of a column are ordered from the latest to
+     * the oldest. The method leverages this ordering and groups the cells into their columns
+     * based on the pair of family name and column qualifier.
+     */
+    private List<Cell> getLatestRowVersion(List<Cell> result) {
+        List<Cell> latestRowVersion = new ArrayList<>();
+        Cell currentColumnCell = null;
+        for (Cell cell : result) {
+            if (currentColumnCell == null ||
+                    !CellUtil.matchingColumn(cell, currentColumnCell)) {
+                currentColumnCell = cell;
+                // found a new column cell which has the latest timestamp
+                latestRowVersion.add(currentColumnCell);
+            }
+        }
+        return latestRowVersion;
+    }
+
     @Override
     /**
      * @param result row to be evaluated against the conditional ttl expression
@@ -88,8 +115,19 @@ public class ConditionTTLExpression extends TTLExpression {
      * if the expression evaluates to true i.e. row is expired
      */
     public long getTTLForRow(List<Cell> result) {
-        // TODO
-        return DEFAULT_TTL;
+        long ttl = DEFAULT_TTL;
+        if (conditionExpr == null) {
+            throw new RuntimeException(
+                    String.format("Condition TTL Expression %s not compiled", this.ttlExpr));
+        }
+        ImmutableBytesWritable ptr = new ImmutableBytesWritable();
+        List<Cell> latestRowVersion = getLatestRowVersion(result);
+        MultiKeyValueTuple row = new MultiKeyValueTuple(latestRowVersion);
+        if (conditionExpr.evaluate(row, ptr)) {
+            Boolean isExpired = (Boolean) PBoolean.INSTANCE.toObject(ptr);
+            ttl = isExpired ? 0 : DEFAULT_TTL;
+        }
+        return ttl;
     }
 
     @Override
@@ -140,6 +178,20 @@ public class ConditionTTLExpression extends TTLExpression {
         }
         // TODO: Fix exception
         throw new SQLException("Parent not found");
+    }
+
+    @Override
+    public Expression compileTTLExpression(PhoenixConnection connection, PTable table) throws IOException {
+        try {
+            ParseNode ttlCondition = parseExpression(connection, table);
+            ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
+            StatementContext context = new StatementContext(new PhoenixStatement(connection), resolver);
+            ExpressionCompiler expressionCompiler = new ExpressionCompiler(context);
+            conditionExpr = ttlCondition.accept(expressionCompiler);
+            return conditionExpr;
+        } catch (SQLException e) {
+            throw new IOException(e);
+        }
     }
 
     /**

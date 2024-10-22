@@ -18,7 +18,6 @@
 package org.apache.phoenix.schema;
 
 import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
-import static org.apache.phoenix.util.TestUtil.in;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -29,12 +28,14 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Properties;
 
+import org.apache.hadoop.hbase.TableName;
 import org.apache.phoenix.end2end.ParallelStatsDisabledIT;
 import org.apache.phoenix.jdbc.PhoenixResultSet;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.ManualEnvironmentEdge;
 import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.QueryUtil;
+import org.apache.phoenix.util.TestUtil;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -58,7 +59,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
     }
 
     @Test
-    public void testMasking() throws Exception {
+    public void testMaskingAndCompaction() throws Exception {
         final String tablename = "T_" + generateUniqueName();
         final String indexName = "I_" + generateUniqueName();
         final String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
@@ -141,6 +142,11 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             assertEquals(7, rs.getInt(1));
             assertEquals(1, rs.getInt(2));
             assertFalse(rs.next());
+
+            TestUtil.flush(getUtility(), TableName.valueOf(tablename));
+            TestUtil.dumpTable(conn, TableName.valueOf(tablename));
+            TestUtil.majorCompact(getUtility(), TableName.valueOf(tablename));
+            TestUtil.dumpTable(conn, TableName.valueOf(tablename));
         }
     }
 
