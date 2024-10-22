@@ -2425,7 +2425,8 @@ public class CompactionScanner implements InternalScanner {
                             trimmedRow.add(cell);
                         }
                     }
-                    lastRowVersion = trimmedRow;
+                    lastRowVersion.clear();
+                    lastRowVersion.addAll(trimmedRow);
                     trimmedEmptyColumn.clear();;
                     for (Cell cell : emptyColumn) {
                         if (cell.getTimestamp() >= minTimestamp) {
