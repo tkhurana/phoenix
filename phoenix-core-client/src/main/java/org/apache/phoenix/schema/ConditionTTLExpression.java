@@ -97,12 +97,25 @@ public class ConditionTTLExpression extends TTLExpression {
     private List<Cell> getLatestRowVersion(List<Cell> result) {
         List<Cell> latestRowVersion = new ArrayList<>();
         Cell currentColumnCell = null;
+        long maxDeleteFamilyTS = 0;
         for (Cell cell : result) {
             if (currentColumnCell == null ||
                     !CellUtil.matchingColumn(cell, currentColumnCell)) {
-                currentColumnCell = cell;
                 // found a new column cell which has the latest timestamp
-                latestRowVersion.add(currentColumnCell);
+                currentColumnCell = cell;
+                if (currentColumnCell.getType() == Cell.Type.DeleteFamily ||
+                        currentColumnCell.getType() == Cell.Type.DeleteFamilyVersion) {
+                    // DeleteFamily will be first in the lexicographically ordering because
+                    // it has no qualifier
+                    maxDeleteFamilyTS = currentColumnCell.getTimestamp();
+                    // no need to add the DeleteFamily cell since it can't be part of
+                    // an expression
+                    continue;
+                }
+                if (currentColumnCell.getTimestamp() > maxDeleteFamilyTS) {
+                    // only add the cell if it is not masked by the DeleteFamily
+                    latestRowVersion.add(currentColumnCell);
+                }
             }
         }
         return latestRowVersion;
@@ -122,6 +135,9 @@ public class ConditionTTLExpression extends TTLExpression {
         }
         ImmutableBytesWritable ptr = new ImmutableBytesWritable();
         List<Cell> latestRowVersion = getLatestRowVersion(result);
+        if (latestRowVersion.isEmpty()) {
+            return ttl;
+        }
         MultiKeyValueTuple row = new MultiKeyValueTuple(latestRowVersion);
         if (conditionExpr.evaluate(row, ptr)) {
             Boolean isExpired = (Boolean) PBoolean.INSTANCE.toObject(ptr);
