@@ -66,8 +66,12 @@ public class ConditionTTLExpression extends TTLExpression {
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
         ConditionTTLExpression that = (ConditionTTLExpression) o;
         return ttlExpr.equals(that.ttlExpr);
     }
