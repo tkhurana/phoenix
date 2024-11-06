@@ -1010,10 +1010,10 @@ public class TestUtil {
         return cellCount;
     }
 
-    static class CellCount {
+    public static class CellCount {
         private Map<String, Integer> rowCountMap = new HashMap<String, Integer>();
 
-        void addCell(String key) {
+        public void addCell(String key) {
             if (rowCountMap.containsKey(key)) {
                 rowCountMap.put(key, rowCountMap.get(key) + 1);
             } else {
@@ -1021,12 +1021,32 @@ public class TestUtil {
             }
         }
 
-        int getCellCount(String key) {
+        public void addRow(String key, int count) {
+            rowCountMap.put(key, count);
+        }
+
+        public void removeRow(String key) {
+            rowCountMap.remove(key);
+        }
+
+        public int getCellCount(String key) {
             if (rowCountMap.containsKey(key)) {
                 return rowCountMap.get(key);
             } else {
                 return 0;
             }
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            CellCount other = (CellCount) o;
+            return rowCountMap.equals(other.rowCountMap);
         }
     }
 
@@ -1205,6 +1225,15 @@ public class TestUtil {
         ResultSet rs = conn.createStatement().executeQuery("SELECT /*+ NO_INDEX */ count(*) FROM " + tableName);
         assertTrue(rs.next());
         return rs.getLong(1);
+    }
+
+    public static long getRowCount(Connection conn, String tableName, boolean skipIndex) throws SQLException {
+        String query = String.format("SELECT %s count(*) FROM %s",
+                (skipIndex ? "/*+ NO_INDEX */" : ""), tableName);
+        try(ResultSet rs = conn.createStatement().executeQuery(query)) {
+            assertTrue(rs.next());
+            return rs.getLong(1);
+        }
     }
 
     public static void addCoprocessor(Connection conn, String tableName, Class coprocessorClass) throws Exception {
@@ -1399,6 +1428,14 @@ public class TestUtil {
         CellCount cellCount = getCellCount(table, true);
         return cellCount.getCellCount(Bytes.toString(row));
     }
+
+    public static CellCount getRawCellCount(Connection conn, TableName tableName)
+            throws IOException, SQLException {
+        ConnectionQueryServices cqs = conn.unwrap(PhoenixConnection.class).getQueryServices();
+        Table table = cqs.getTable(tableName.getName());
+        return getCellCount(table, true);
+    }
+
     public static void assertRawCellCount(Connection conn, TableName tableName,
                                           byte[] row, int expectedCellCount)
         throws SQLException, IOException {
