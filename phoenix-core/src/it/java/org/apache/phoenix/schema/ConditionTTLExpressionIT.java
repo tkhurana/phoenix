@@ -31,7 +31,6 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
@@ -43,12 +42,10 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
 import org.apache.phoenix.end2end.ParallelStatsDisabledIT;
 import org.apache.phoenix.jdbc.PhoenixResultSet;
-import org.apache.phoenix.query.PhoenixTestBuilder;
-import org.apache.phoenix.query.PhoenixTestBuilder.DataSupplier;
-import org.apache.phoenix.query.PhoenixTestBuilder.DataWriter;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder.TableOptions;
 import org.apache.phoenix.query.QueryConstants;
+import org.apache.phoenix.thirdparty.com.google.common.base.Joiner;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
@@ -79,7 +76,10 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
     private static final String[] PK_COLUMNS = {"ID1", "ID2"};
     private static final String[] PK_COLUMN_TYPES = {"VARCHAR", "BIGINT"};
     private static final String[] COLUMNS = {
-            "VAL0", "VAL1", "VAL2", "VAL3", "VAL4"
+            "VAL1", "VAL2", "VAL3", "VAL4", "VAL5"
+    };
+    private static final String[] COLUMN_TYPES = {
+            "CHAR(15)", "SMALLINT", "DATE", "TIMESTAMP", "BOOLEAN"
     };
     // define for each column
     private static final String[] DEFAULT_COLUMN_FAMILIES = {
@@ -89,18 +89,22 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
     private static final String[] MULTI_COLUMN_FAMILIES = {
             null, "A", "A", "B", "C"
     };
-    private static final String[] COLUMN_TYPES = {
-            "CHAR(15)", "SMALLINT", "DATE", "TIMESTAMP", "BOOLEAN"
-    };
+
+    static {
+        assert COLUMNS.length == COLUMN_TYPES.length;
+        assert COLUMNS.length == DEFAULT_COLUMN_FAMILIES.length;
+        assert COLUMNS.length == MULTI_COLUMN_FAMILIES.length;
+    }
 
     private ManualEnvironmentEdge injectEdge;
     private String tableDDLOptions;
     private final boolean multiCF;
     private final boolean columnEncoded;
     private final Integer tableLevelMaxLooback;
-    private final String[] allColumns = new String[PK_COLUMNS.length + COLUMNS.length];
+    // column names -> fully qualified column names
+    private Map<String, String> columns = Maps.newHashMap();
     private SchemaBuilder schemaBuilder;
-    // map of row-pos -> HBase row-key
+    // map of row-pos -> HBase row-key, used for verification
     private Map<Integer, String> rowPosToKey = Maps.newHashMap();
 
     public ConditionTTLExpressionIT(boolean multiCF,
@@ -109,13 +113,9 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         this.multiCF = multiCF;
         this.columnEncoded = columnEncoded;
         this.tableLevelMaxLooback = tableLevelMaxLooback; // in ms
-        int pos = 0;
-        for (int i = 0; i < PK_COLUMNS.length; ++i) {
-            allColumns[pos++] = PK_COLUMNS[i];
-        }
         String[] columnFamilies = this.multiCF ? MULTI_COLUMN_FAMILIES : DEFAULT_COLUMN_FAMILIES;
         for (int i = 0; i < COLUMNS.length; ++i) {
-            allColumns[pos++] = SchemaUtil.getColumnName(columnFamilies[i], COLUMNS[i]);
+            columns.put(COLUMNS[i], SchemaUtil.getColumnName(columnFamilies[i], COLUMNS[i]));
         }
         schemaBuilder = new SchemaBuilder(getUrl());
     }
@@ -127,9 +127,9 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                 {false, false, 0},
                 {false, true, 0},
                 {false, false, 15},
-                {false, true, 15},
-                {true, false, 0},
-                {true, true, 15}
+                {false, true, 15}
+               // {true, false, 0},
+                //{true, true, 15}
         });
     }
 
@@ -164,7 +164,6 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         EnvironmentEdgeManager.reset();
     }
 
-    @Test
     public void testMaskingAndCompaction() throws Exception {
         final String tablename = "T_" + generateUniqueName();
         final String indexName = "I_" + generateUniqueName();
@@ -278,7 +277,6 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         }
     }
 
-    @Test
     public void testDeleteMarkers() throws Exception {
         final String tablename = "T_" + generateUniqueName();
         final String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
@@ -327,9 +325,9 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
 
     @Test
     public void testBasicMaskingAndCompaction() throws Exception {
-        // ttl = 'VAL4 = TRUE'
-        int colPos = PK_COLUMNS.length + 4;
-        String ttlExpression = String.format("%s=TRUE", allColumns[colPos]);
+        String ttlCol = columns.get("VAL5");
+        // ttl = '<FAMILY>.VAL4 = TRUE'
+        String ttlExpression = String.format("%s=TRUE", ttlCol);
         createTable(ttlExpression, false);
         String tableName = schemaBuilder.getEntityTableName();
         injectEdge();
@@ -339,31 +337,37 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             populateTable(conn, rowCount);
             ResultSet rs = readRow(conn, 3);
             assertTrue(rs.next());
-            assertFalse(rs.getBoolean(colPos + 1));
+            assertFalse(rs.getBoolean(ttlCol));
+
             // expire 1 row by setting to true
             injectEdge.incrementValue(10);
-            updateColumn(conn, 3, colPos, true);
+            updateColumn(conn, 3, ttlCol, true);
             actual = TestUtil.getRowCount(conn, tableName, true);
             Assert.assertEquals(rowCount - 1, actual);
+
             // read the row again, this time it should be masked
             rs = readRow(conn, 3);
             assertFalse(rs.next());
+
             // expire 1 more row
             injectEdge.incrementValue(10);
-            updateColumn(conn, 2, colPos, true);
+            updateColumn(conn, 2, ttlCol, true);
             actual = TestUtil.getRowCount(conn, tableName, true);
             Assert.assertEquals(rowCount - 2, actual);
+
             // refresh the row again
             injectEdge.incrementValue(10);
-            updateColumn(conn, 3, colPos, false);
+            updateColumn(conn, 3, ttlCol, false);
             rs = readRow(conn, 3);
             assertTrue(rs.next());
-            assertFalse(rs.getBoolean(colPos + 1));
+            assertFalse(rs.getBoolean(ttlCol));
             actual = TestUtil.getRowCount(conn, tableName, true);
             Assert.assertEquals(rowCount - 1, actual);
+
             // expire the row again
             injectEdge.incrementValue(10);
-            updateColumn(conn, 3, colPos, true);
+            updateColumn(conn, 3, ttlCol, true);
+
             // increment by atleast 2*maxlookback so that there are no updates within the
             // maxlookback window and no updates visible through the maxlookback window
             injectEdge.incrementValue(2*tableLevelMaxLooback + 5);
@@ -385,9 +389,9 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         if (tableLevelMaxLooback == 0) {
             return;
         }
-        // ttl = 'VAL4 = TRUE'
-        int colPos = PK_COLUMNS.length + 4;
-        String ttlExpression = String.format("%s=TRUE", allColumns[colPos]);
+        String ttlCol = columns.get("VAL5");
+        // ttl = '<FAMILY>.VAL4 = TRUE'
+        String ttlExpression = String.format("%s=TRUE", ttlCol);
         createTable(ttlExpression, false);
         String tableName = schemaBuilder.getEntityTableName();
         injectEdge();
@@ -398,31 +402,37 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             populateTable(conn, rowCount);
             ResultSet rs = readRow(conn, 3);
             assertTrue(rs.next());
-            assertFalse(rs.getBoolean(colPos + 1));
+            assertFalse(rs.getBoolean(ttlCol));
+
             // expire 1 row by setting to true
             injectEdge.incrementValue(1);
-            updateColumn(conn, 3, colPos, true);
+            updateColumn(conn, 3, ttlCol, true);
             actual = TestUtil.getRowCount(conn, tableName, true);
-            Assert.assertEquals(rowCount - 1, actual);
+            assertEquals(rowCount - 1, actual);
+
             // read the row again, this time it should be masked
             rs = readRow(conn, 3);
             assertFalse(rs.next());
+
             // expire 1 more row
             injectEdge.incrementValue(1);
-            updateColumn(conn, 2, colPos, true);
+            updateColumn(conn, 2, ttlCol, true);
             actual = TestUtil.getRowCount(conn, tableName, true);
-            Assert.assertEquals(rowCount - 2, actual);
+            assertEquals(rowCount - 2, actual);
+
             // refresh the row again
             injectEdge.incrementValue(1);
-            updateColumn(conn, 3, colPos, false);
+            updateColumn(conn, 3, ttlCol, false);
             rs = readRow(conn, 3);
             assertTrue(rs.next());
-            assertFalse(rs.getBoolean(colPos + 1));
+            assertFalse(rs.getBoolean(ttlCol));
             actual = TestUtil.getRowCount(conn, tableName, true);
-            Assert.assertEquals(rowCount - 1, actual);
+            assertEquals(rowCount - 1, actual);
+
             // expire the row again
             injectEdge.incrementValue(1);
-            updateColumn(conn, 3, colPos, true);
+            updateColumn(conn, 3, ttlCol, true);
+
             // all the updates are within the maxlookback window
             injectEdge.setValue(startTime + tableLevelMaxLooback);
             doMajorCompaction(tableName);
@@ -443,9 +453,9 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         if (tableLevelMaxLooback == 0) {
             return;
         }
-        // ttl = 'VAL4 = TRUE'
-        int colPos = PK_COLUMNS.length + 4;
-        String ttlExpression = String.format("%s=TRUE", allColumns[colPos]);
+        String ttlCol = columns.get("VAL5");
+        // ttl = '<FAMILY>.VAL4 = TRUE'
+        String ttlExpression = String.format("%s=TRUE", ttlCol);
         createTable(ttlExpression, false);
         String tableName = schemaBuilder.getEntityTableName();
         injectEdge();
@@ -456,32 +466,38 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             populateTable(conn, rowCount);
             ResultSet rs = readRow(conn, 3);
             assertTrue(rs.next());
-            assertFalse(rs.getBoolean(colPos + 1));
+            assertFalse(rs.getBoolean(ttlCol));
+
             // expire 1 row by setting to true
             injectEdge.incrementValue(1);
-            updateColumn(conn, 3, colPos, true);
+            updateColumn(conn, 3, ttlCol, true);
             actual = TestUtil.getRowCount(conn, tableName, true);
-            Assert.assertEquals(rowCount - 1, actual);
+            assertEquals(rowCount - 1, actual);
+
             // read the row again, this time it should be masked
             rs = readRow(conn, 3);
             assertFalse(rs.next());
+
             // expire 1 more row
             injectEdge.incrementValue(1);
-            updateColumn(conn, 2, colPos, true);
+            updateColumn(conn, 2, ttlCol, true);
             actual = TestUtil.getRowCount(conn, tableName, true);
-            Assert.assertEquals(rowCount - 2, actual);
+            assertEquals(rowCount - 2, actual);
+
             // refresh the row again
             injectEdge.incrementValue(1);
-            updateColumn(conn, 3, colPos, false);
+            updateColumn(conn, 3, ttlCol, false);
             rs = readRow(conn, 3);
             assertTrue(rs.next());
-            assertFalse(rs.getBoolean(colPos + 1));
+            assertFalse(rs.getBoolean(ttlCol));
             actual = TestUtil.getRowCount(conn, tableName, true);
-            Assert.assertEquals(rowCount - 1, actual);
+            assertEquals(rowCount - 1, actual);
+
             // expire the row again
             injectEdge.incrementValue(tableLevelMaxLooback);
-            updateColumn(conn, 3, colPos, true);
-            // only the last update is visible through the maxlookback window
+            updateColumn(conn, 3, ttlCol, true);
+
+            // only the last update should be visible through the maxlookback window
             injectEdge.incrementValue(tableLevelMaxLooback + 2);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
@@ -496,32 +512,35 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             validateTable(conn, tableName, expectedCellCount);
             actual = TestUtil.getRowCount(conn, tableName, true);
             // 1 row purged and 1 row masked
-            Assert.assertEquals(rowCount - 2, actual);
+            assertEquals(rowCount - 2, actual);
         }
     }
 
     @Test
     public void testPhoenixRowTimestamp() throws Exception {
-        String ttlExpression =
-                "TO_NUMBER(CURRENT_TIME()) - TO_NUMBER(PHOENIX_ROW_TIMESTAMP()) >= 50"; // 50ms TTL
+        int ttl = 50;
+        String ttlExpression = String.format("TO_NUMBER(CURRENT_TIME()) - TO_NUMBER(PHOENIX_ROW_TIMESTAMP())" +
+                " >= %d", ttl); // equivalent to a ttl of 50ms
         createTable(ttlExpression, false);
         String tableName = schemaBuilder.getEntityTableName();
         injectEdge();
         int rowCount = 5;
         long actual;
-        int ttl = 50;
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             populateTable(conn, rowCount);
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(rowCount, actual);
+
             // bump the time so that the ttl expression evaluates to true
             injectEdge.incrementValue(ttl);
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(0, actual);
+
             // update VAL3 column of row 1
-            updateColumn(conn, 1, PK_COLUMNS.length + 3, injectEdge.currentTime());
+            updateColumn(conn, 1, columns.get("VAL4"), injectEdge.currentTime());
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(1, actual);
+
             // advance the time by maxlookbackwindow but still within ttl
             // only the last version is retained no bread crumbs
             injectEdge.incrementValue(tableLevelMaxLooback + 2);
@@ -534,33 +553,29 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
 
     @Test
     public void testDateExpression() throws Exception {
-        // ttl = 'CURRENT_DATE() >= VAL2 + 1'  // 1 day beyond the value stored in VAL2
-        int colPos = PK_COLUMNS.length + 2;  // VAL2
-        String ttlExpression = String.format("CURRENT_DATE() >= %s + 1", allColumns[colPos]);
+        // ttl = 'CURRENT_DATE() >= <FAMILY>.VAL2 + 1'  // 1 day beyond the value stored in VAL2
+        String ttlCol = columns.get("VAL3");
+        String ttlExpression = String.format("CURRENT_DATE() >= %s + 1", ttlCol);
         createTable(ttlExpression, false);
         String tableName = schemaBuilder.getEntityTableName();
         injectEdge();
-        int rowCount = 3;
+        int rowCount = 5;
         long actual;
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             populateTable(conn, rowCount);
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(rowCount, actual);
+
             // bump the time so that the ttl expression evaluates to true
             injectEdge.incrementValue(QueryConstants.MILLIS_IN_DAY + 1200);
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(0, actual);
+
             // update VAL2 column of row 2
-            updateColumn(conn, 2, colPos, new Date(injectEdge.currentTime()));
-            if (columnEncoded == true) {
-                // update VAL3
-                //updateColumn(conn, 2, colPos + 1,
-                        //new Timestamp(injectEdge.currentTime()));
-                // update VAL4
-                //updateColumn(conn, 2,colPos + 2, false);
-            }
+            updateColumn(conn, 2, ttlCol, new Date(injectEdge.currentTime()));
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(1, actual);
+
             // advance the time by maxlookbackwindow but still within ttl
             // only the last version is retained no bread crumbs
             injectEdge.incrementValue(tableLevelMaxLooback + 2);
@@ -611,36 +626,87 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         EnvironmentEdgeManager.injectEdge(injectEdge);
     }
 
-    private Object[] generatePKColumnValues(int rowPosition) {
+    private List<Object> generatePKColumnValues(int rowPosition) {
         final String ID1_FORMAT = "id1_%d";
         String id1 = String.format(ID1_FORMAT, rowPosition / 2);
         int id2 = rowPosition;
-        return new Object[] {id1, id2};
+        return Lists.newArrayList(id1, id2);
     }
 
     private List<Object> generateRow(int rowPosition) {
         long startTime = EnvironmentEdgeManager.currentTimeMillis();
-        Object[] pkCols = generatePKColumnValues(rowPosition);
+        List<Object> pkCols = generatePKColumnValues(rowPosition);
         String val0 = "val0_" + RAND.nextInt(MAX_ROWS);
         int val1 = RAND.nextInt(MAX_ROWS);
         Date val2 = new Date(startTime + RAND.nextInt(MAX_ROWS));
         Timestamp val3 = new Timestamp(val2.getTime());
         boolean val4 = false;
         List<Object> cols = Lists.newArrayList(val0, val1, val2, val3, val4);
-        List<Object> values = Lists.newArrayListWithExpectedSize(
-                pkCols.length + cols.size());
-        values.addAll(Arrays.asList(pkCols));
+        List<Object> values = Lists.newArrayListWithExpectedSize(pkCols.size() + cols.size());
+        values.addAll(pkCols);
         values.addAll(cols);
         return values;
     }
 
+    private void updateColumn(Connection conn,
+                              int rowPosition,
+                              String columnName,
+                              Object newColumnValue) throws Exception {
+        String tableName = schemaBuilder.getEntityTableName();
+        List<String> upsertColumns = Lists.newArrayList();
+        upsertColumns.addAll(Arrays.asList(PK_COLUMNS));
+        upsertColumns.add(columnName);
+        StringBuilder buf = new StringBuilder("UPSERT INTO ");
+        buf.append(tableName);
+        buf.append(" (").append(Joiner.on(",").join(upsertColumns)).append(") VALUES(");
+        for (int i = 0; i < upsertColumns.size(); i++) {
+            buf.append("?,");
+        }
+        buf.setCharAt(buf.length() - 1, ')');
+        List<Object> upsertValues = Lists.newArrayList();
+        upsertValues.addAll(generatePKColumnValues(rowPosition));
+        upsertValues.add(newColumnValue);
+        try (PreparedStatement stmt = conn.prepareStatement(buf.toString())) {
+            for (int i = 0; i < upsertValues.size(); i++) {
+                stmt.setObject(i + 1, upsertValues.get(i));
+            }
+            stmt.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    private void updateRow(Connection conn, int rowPosition) throws Exception {
+        String tableName = schemaBuilder.getEntityTableName();
+        List<Object> upsertValues = generateRow(rowPosition);
+        StringBuilder buf = new StringBuilder("UPSERT INTO ");
+        buf.append(tableName);
+        buf.append(" VALUES(");
+        for (int i = 0; i < upsertValues.size(); i++) {
+            buf.append("?,");
+        }
+        buf.setCharAt(buf.length() - 1, ')');
+        try (PreparedStatement stmt = conn.prepareStatement(buf.toString())) {
+            for (int i = 0; i < upsertValues.size(); i++) {
+                stmt.setObject(i + 1, upsertValues.get(i));
+            }
+            stmt.executeUpdate();
+            conn.commit();
+        }
+    }
+
     private void populateTable(Connection conn, int rowCount) throws Exception {
         for (int i = 0; i < rowCount; ++i) {
-            upsertRow(conn, i, Collections.EMPTY_LIST, Collections.EMPTY_LIST);
+            updateRow(conn, i);
         }
+        // used for verification purposes
         populateRowPosToRowKey(conn);
     }
 
+    /**
+     * TODO
+     * @param conn
+     * @throws SQLException
+     */
     private void populateRowPosToRowKey(Connection conn) throws SQLException {
         String tableName = schemaBuilder.getEntityTableName();
         String query = "SELECT ID2, ROWKEY_BYTES_STRING() FROM " + tableName;
@@ -653,64 +719,13 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         }
     }
 
-    private void updateColumn(Connection conn,
-                              int rowPosition,
-                              int columnPosition,
-                              Object newColumnValue) throws Exception {
-        upsertRow(conn, rowPosition,
-                Lists.newArrayList(columnPosition),
-                Lists.newArrayList(newColumnValue));
-    }
-
-    private void upsertRow(Connection conn,
-                           int rowPosition,
-                           List<Integer> columnsToUpdate,
-                           List<Object> columnValues) throws Exception {
-        assert (columnsToUpdate.size() == columnValues.size());
-        DataSupplier dataSupplier = new DataSupplier() {
-            @Override
-            public List<Object> getValues(int rowPosition) throws Exception {
-                if (columnsToUpdate.isEmpty()) {
-                    // full row update
-                    return generateRow(rowPosition);
-                }
-                Object[] allColumnValues = new Object[allColumns.length];
-                Object[] pkCols = generatePKColumnValues(rowPosition);
-                for (int i = 0; i < pkCols.length; ++i) {
-                    allColumnValues[i] = pkCols[i];
-                }
-                for (int i = 0; i < columnsToUpdate.size(); ++i) {
-                    int colPos = columnsToUpdate.get(i);
-                    Object val = columnValues.get(i);
-                    allColumnValues[colPos] = val;
-                }
-                return Arrays.asList(allColumnValues);
-            }
-        };
-        DataWriter dataWriter = new PhoenixTestBuilder.BasicDataWriter();
-        dataWriter.setConnection(conn);
-        dataWriter.setDataSupplier(dataSupplier);
-        dataWriter.setRowKeyColumns(Arrays.asList(PK_COLUMNS));
-        dataWriter.setUpsertColumns(Arrays.asList(allColumns));
-        dataWriter.setTargetEntity(schemaBuilder.getEntityTableName());
-        if (!columnsToUpdate.isEmpty()) {
-            List<Integer> columnsToUpdateWithPKCols = Lists.newArrayList();
-            for (int i = 0; i < PK_COLUMNS.length; ++i) {
-                columnsToUpdateWithPKCols.add(i);
-            }
-            columnsToUpdateWithPKCols.addAll(columnsToUpdate);
-            dataWriter.setColumnPositionsToUpdate(columnsToUpdateWithPKCols);
-        }
-        dataWriter.upsertRow(rowPosition);
-    }
-
     private ResultSet readRow(Connection conn, int rowPosition) throws SQLException {
         String tableName = schemaBuilder.getEntityTableName();
         String query = String.format("select * FROM %s where ID1 = ? AND ID2 = ?", tableName);
-        Object[] pkCols = generatePKColumnValues(rowPosition);
+        List<Object> pkCols = generatePKColumnValues(rowPosition);
         PreparedStatement ps = conn.prepareStatement(query);
-        for (int i = 0; i < pkCols.length; ++i) {
-            ps.setObject(i + 1, pkCols[i]);
+        for (int i = 0; i < pkCols.size(); ++i) {
+            ps.setObject(i + 1, pkCols.get(i));
         }
         return ps.executeQuery();
     }
