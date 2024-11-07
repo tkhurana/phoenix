@@ -32,6 +32,7 @@ import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -56,6 +57,9 @@ import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TestUtil;
 import org.apache.phoenix.util.TestUtil.CellCount;
+import org.apache.phoenix.util.bson.TestFieldValue;
+import org.apache.phoenix.util.bson.TestFieldsMap;
+import org.bson.BsonDocument;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -76,18 +80,16 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
     private static final String[] PK_COLUMNS = {"ID1", "ID2"};
     private static final String[] PK_COLUMN_TYPES = {"VARCHAR", "BIGINT"};
     private static final String[] COLUMNS = {
-            "VAL1", "VAL2", "VAL3", "VAL4", "VAL5"
+            "VAL1", "VAL2", "VAL3", "VAL4", "VAL5", "VAL6"
     };
     private static final String[] COLUMN_TYPES = {
-            "CHAR(15)", "SMALLINT", "DATE", "TIMESTAMP", "BOOLEAN"
+            "CHAR(15)", "SMALLINT", "DATE", "TIMESTAMP", "BOOLEAN", "BSON"
     };
-    // define for each column
-    private static final String[] DEFAULT_COLUMN_FAMILIES = {
-            null, null, null, null, null
-    };
+    // initialized to null
+    private static final String[] DEFAULT_COLUMN_FAMILIES = new String [COLUMNS.length];
     // define for each column
     private static final String[] MULTI_COLUMN_FAMILIES = {
-            null, "A", "A", "B", "C"
+            null, "A", "A", "B", "C", "C"
     };
 
     static {
@@ -586,6 +588,38 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         }
     }
 
+    @Test
+    public void testBsonDataType() throws Exception {
+        String ttlCol = columns.get("VAL6");
+        String ttlExpression = String.format(
+                "BSON_VALUE(%s, ''attr_0'', ''VARCHAR'') IS NULL", ttlCol);
+        createTable(ttlExpression, false);
+        String tableName = schemaBuilder.getEntityTableName();
+        injectEdge();
+        int rowCount = 5;
+        long actual;
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            populateTable(conn, rowCount);
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            // only odd rows (1,3) have non null attribute value
+            assertEquals(2, actual);
+
+            // increment by atleast 2*maxlookback so that there are no updates within the
+            // maxlookback window and no updates visible through the maxlookback window
+            injectEdge.incrementValue(2*tableLevelMaxLooback + 5);
+            doMajorCompaction(tableName);
+            CellCount expectedCellCount = new CellCount();
+            for (int i = 0; i < rowCount; ++i) {
+                // only odd rows should be retained
+                if (i % 2 != 0) {
+                    // additional cell for empty column
+                    expectedCellCount.addRow(rowPosToKey.get(i), COLUMNS.length + 1);
+                }
+            }
+            validateTable(conn, tableName, expectedCellCount);
+        }
+    }
+
     private void validateTable(Connection conn, String tableName, CellCount expectedCellCount)
             throws Exception {
         CellCount actualCellCount = TestUtil.getRawCellCount(conn, TableName.valueOf(tableName));
@@ -633,15 +667,28 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         return Lists.newArrayList(id1, id2);
     }
 
+    private BsonDocument generateBsonDocument(int rowPosition) {
+        Map<String, TestFieldValue> map = new HashMap<>();
+        if (rowPosition % 2 != 0) {
+            map.put("attr_0", new TestFieldValue().withS("str_val_" + rowPosition));
+        }
+        map.put("attr_1", new TestFieldValue().withN(rowPosition * rowPosition));
+        map.put("attr_2", new TestFieldValue().withBOOL(rowPosition % 2 == 0));
+        TestFieldsMap testFieldsMap = new TestFieldsMap();
+        testFieldsMap.setMap(map);
+        return org.apache.phoenix.util.bson.TestUtil.getBsonDocument(testFieldsMap);
+    }
+
     private List<Object> generateRow(int rowPosition) {
         long startTime = EnvironmentEdgeManager.currentTimeMillis();
         List<Object> pkCols = generatePKColumnValues(rowPosition);
-        String val0 = "val0_" + RAND.nextInt(MAX_ROWS);
-        int val1 = RAND.nextInt(MAX_ROWS);
-        Date val2 = new Date(startTime + RAND.nextInt(MAX_ROWS));
-        Timestamp val3 = new Timestamp(val2.getTime());
-        boolean val4 = false;
-        List<Object> cols = Lists.newArrayList(val0, val1, val2, val3, val4);
+        String val1 = "val1_" + RAND.nextInt(MAX_ROWS);
+        int val2 = RAND.nextInt(MAX_ROWS);
+        Date val3 = new Date(startTime + RAND.nextInt(MAX_ROWS));
+        Timestamp val4 = new Timestamp(val3.getTime());
+        boolean val5 = false;
+        BsonDocument val6 = generateBsonDocument(rowPosition);
+        List<Object> cols = Lists.newArrayList(val1, val2, val3, val4, val5, val6);
         List<Object> values = Lists.newArrayListWithExpectedSize(pkCols.size() + cols.size());
         values.addAll(pkCols);
         values.addAll(cols);
