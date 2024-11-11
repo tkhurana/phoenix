@@ -95,6 +95,7 @@ import static org.apache.phoenix.schema.PTableImpl.getColumnsToClone;
 import static org.apache.phoenix.schema.PTableType.CDC;
 import static org.apache.phoenix.schema.PTableType.INDEX;
 import static org.apache.phoenix.schema.PTableType.VIEW;
+import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_FORVER;
 import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.util.PhoenixRuntime.TENANT_ID_ATTRIB;
 import static org.apache.phoenix.util.SchemaUtil.*;
@@ -1684,6 +1685,11 @@ TABLE_FAMILY_BYTES, TABLE_SEQ_NUM_BYTES);
                     parentSchemaName == null ? null : parentSchemaName.getBytes(),
                     parentTableName.getBytes());
             ttl = getTTLForTable(tableKey, clientTimeStamp);
+        }
+        if (tableType == INDEX &&
+                CDCUtil.isCDCIndex(tableName.getString()) &&
+                ttl != TTL_EXPRESSION_NOT_DEFINED) {
+            ttl = TTL_EXPRESSION_FORVER;
         }
         builder.setTTL(ttl);
         builder.setEncodedCQCounter(cqCounter);

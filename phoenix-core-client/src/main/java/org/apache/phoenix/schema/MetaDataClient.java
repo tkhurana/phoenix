@@ -3729,7 +3729,9 @@ public class MetaDataClient {
                                 : statement.getWhereClause().toString())
                         .setMaxLookbackAge(maxLookbackAge)
                         .setCDCIncludeScopes(cdcIncludeScopes)
-                        .setTTL(ttl == null || ttl == TTL_EXPRESSION_NOT_DEFINED ? ttlFromHierarchy : ttl)
+                        .setTTL(result.getTable() != null ?
+                                result.getTable().getTTL() :
+                                ttl == null || ttl == TTL_EXPRESSION_NOT_DEFINED ? ttlFromHierarchy : ttl)
                         .setRowKeyMatcher(rowKeyMatcher)
                         .build();
                 result = new MetaDataMutationResult(code, result.getMutationTime(), table, true);
