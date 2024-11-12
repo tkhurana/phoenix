@@ -104,7 +104,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
     private String tableDDLOptions;
     private final boolean multiCF;
     private final boolean columnEncoded;
-    private final Integer tableLevelMaxLooback;
+    private final Integer tableLevelMaxLookback;
     // column names -> fully qualified column names
     private Map<String, String> columns = Maps.newHashMap();
     private SchemaBuilder schemaBuilder;
@@ -116,7 +116,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                                     Integer tableLevelMaxLooback) {
         this.multiCF = multiCF;
         this.columnEncoded = columnEncoded;
-        this.tableLevelMaxLooback = tableLevelMaxLooback; // in ms
+        this.tableLevelMaxLookback = tableLevelMaxLooback; // in ms
         String[] columnFamilies = this.multiCF ? MULTI_COLUMN_FAMILIES : DEFAULT_COLUMN_FAMILIES;
         for (int i = 0; i < COLUMNS.length; ++i) {
             columns.put(COLUMNS[i], SchemaUtil.getColumnName(columnFamilies[i], COLUMNS[i]));
@@ -151,7 +151,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
     public void beforeTest() {
         StringBuilder optionBuilder = new StringBuilder();
         optionBuilder.append(" TTL = '%s'"); // placeholder for TTL
-        optionBuilder.append(", MAX_LOOKBACK_AGE=" + tableLevelMaxLooback);
+        optionBuilder.append(", MAX_LOOKBACK_AGE=" + tableLevelMaxLookback);
         if (columnEncoded) {
             optionBuilder.append(", COLUMN_ENCODED_BYTES=2");
         } else {
@@ -281,52 +281,6 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         }
     }
 
-    public void testDeleteMarkers() throws Exception {
-        final String tablename = "T_" + generateUniqueName();
-        final String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
-                "val varchar, expired boolean constraint pk primary key (k1,k2))" +
-                "TTL = 'expired'";
-        Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
-
-        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
-            String ddl = String.format(ddlTemplate, tablename);
-            conn.createStatement().execute(ddl);
-            conn.commit();
-            long startTime = System.currentTimeMillis() + 1000;
-            startTime = (startTime / 1000) * 1000;
-            injectEdge.setValue(startTime);
-            EnvironmentEdgeManager.injectEdge(injectEdge);
-            PreparedStatement dml = conn.prepareStatement("upsert into " + tablename + " VALUES(?, ?, ?, ?)");
-            int rows = 5, cols = 2;
-            int total = rows * cols;
-            for (int i = 0; i < rows; ++i) {
-                for (int j = 0; j < cols; ++j) {
-                    dml.setInt(1, i);
-                    dml.setInt(2, j);
-                    dml.setString(3, "val_" + i);
-                    dml.setBoolean(4, false);
-                    dml.executeUpdate();
-                }
-            }
-            conn.commit();
-            injectEdge.incrementValue(10);
-            dml = conn.prepareStatement("delete from " + tablename + " where k2=1");
-            dml.executeUpdate();
-            conn.commit();
-            injectEdge.incrementValue(10);
-            dml = conn.prepareStatement("upsert into " + tablename + "(k1, k2, expired) VALUES(?, ?, ?)");
-            for (int i = 0; i < rows; ++i) {
-                dml.setInt(1, i);
-                dml.setInt(2, 1);
-                dml.setBoolean(3, true);
-                dml.executeUpdate();
-            }
-            conn.commit();
-            TestUtil.flush(getUtility(), TableName.valueOf(tablename));
-            TestUtil.majorCompact(getUtility(), TableName.valueOf(tablename));
-        }
-    }
-
     @Test
     public void testBasicMaskingAndCompaction() throws Exception {
         String ttlCol = columns.get("VAL5");
@@ -374,7 +328,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
 
             // increment by atleast 2*maxlookback so that there are no updates within the
             // maxlookback window and no updates visible through the maxlookback window
-            injectEdge.incrementValue(2*tableLevelMaxLooback + 5);
+            injectEdge.incrementValue(2* tableLevelMaxLookback + 5);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
@@ -390,7 +344,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
 
     @Test
     public void testEverythingRetainedWithinMaxLookBack() throws Exception {
-        if (tableLevelMaxLooback == 0) {
+        if (tableLevelMaxLookback == 0) {
             return;
         }
         String ttlCol = columns.get("VAL5");
@@ -438,7 +392,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             updateColumn(conn, 3, ttlCol, true);
 
             // all the updates are within the maxlookback window
-            injectEdge.setValue(startTime + tableLevelMaxLooback);
+            injectEdge.setValue(startTime + tableLevelMaxLookback);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
@@ -454,7 +408,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
 
     @Test
     public void testLastVersionRetainedVisibleThroughMaxLookBack() throws Exception {
-        if (tableLevelMaxLooback == 0) {
+        if (tableLevelMaxLookback == 0) {
             return;
         }
         String ttlCol = columns.get("VAL5");
@@ -498,11 +452,11 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             assertEquals(rowCount - 1, actual);
 
             // expire the row again
-            injectEdge.incrementValue(tableLevelMaxLooback);
+            injectEdge.incrementValue(tableLevelMaxLookback);
             updateColumn(conn, 3, ttlCol, true);
 
             // only the last update should be visible through the maxlookback window
-            injectEdge.incrementValue(tableLevelMaxLooback + 2);
+            injectEdge.incrementValue(tableLevelMaxLookback + 2);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
@@ -547,11 +501,88 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
 
             // advance the time by maxlookbackwindow but still within ttl
             // only the last version is retained no bread crumbs
-            injectEdge.incrementValue(tableLevelMaxLooback + 2);
+            injectEdge.incrementValue(tableLevelMaxLookback + 2);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
             expectedCellCount.addRow(rowPosToKey.get(1), COLUMNS.length + 1);
             validateTable(conn, tableName, expectedCellCount);
+        }
+    }
+
+    @Test
+    public void testDeleteMarkers() throws Exception {
+        String ttlCol = columns.get("VAL5");
+        // ttl = '<FAMILY>.VAL4 = TRUE'
+        String ttlExpression = String.format("%s=TRUE", ttlCol);
+        createTable(ttlExpression, false);
+        String tableName = schemaBuilder.getEntityTableName();
+        injectEdge();
+        int rowCount = 5;
+        long actual;
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            populateTable(conn, rowCount);
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount, actual);
+            injectEdge.incrementValue(5);
+            String dml = String.format("delete from %s where ID1 = ? and ID2 = ?", tableName);
+            PreparedStatement ps = conn.prepareStatement(dml);
+            // delete rows 2, 3
+            int [] rowsToDelete = new int[]{2, 3};
+            for (int rowPosition : rowsToDelete) {
+                List<Object> pkCols = generatePKColumnValues(rowPosition);
+                for (int i = 0; i < pkCols.size(); ++i) {
+                    ps.setObject(i + 1, pkCols.get(i));
+                }
+                ps.executeUpdate();
+            }
+            conn.commit();
+            // expire row # 1
+            injectEdge.incrementValue(1);
+            updateColumn(conn, 1, ttlCol, true);
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            // 1 row expired, 2 deleted
+            assertEquals(2, actual);
+            if (tableLevelMaxLookback == 0) {
+                // increment so that all updates are outside of max lookback
+                injectEdge.incrementValue(2);
+                doMajorCompaction(tableName);
+                // only 2 rows should be retained
+                CellCount expectedCellCount = new CellCount();
+                expectedCellCount.addRow(rowPosToKey.get(0), COLUMNS.length + 1);
+                expectedCellCount.addRow(rowPosToKey.get(4), COLUMNS.length + 1);
+                validateTable(conn, tableName, expectedCellCount);
+            } else {
+                // all updates within the max lookback window, retain everything
+                doMajorCompaction(tableName);
+                CellCount expectedCellCount = new CellCount();
+                for (int i = 0; i < rowCount; ++i) {
+                    // additional cell for empty column
+                    expectedCellCount.addRow(rowPosToKey.get(i), COLUMNS.length + 1);
+                }
+                // update cell count for expired rows
+                updateExpectedCellCountForRow(1, 1, expectedCellCount); // updated 1 time
+                for (int rowPosition : rowsToDelete) {
+                    // one DeleteFamily cell
+                    expectedCellCount.addCell(rowPosToKey.get(rowPosition));
+                }
+                validateTable(conn, tableName, expectedCellCount);
+                // increment so that the delete markers are outside of max lookback but the
+                // expired row is still visible
+                injectEdge.incrementValue(tableLevelMaxLookback + 1);
+                doMajorCompaction(tableName);
+                for (int rowPosition : rowsToDelete) {
+                    expectedCellCount.removeRow(rowPosToKey.get(rowPosition));
+                }
+                // only the latest version of expired row is retained
+                expectedCellCount.addRow(rowPosToKey.get(1), COLUMNS.length + 1);
+                validateTable(conn, tableName, expectedCellCount);
+
+                // purge the expired row also
+                injectEdge.incrementValue(tableLevelMaxLookback + 1);
+                doMajorCompaction(tableName);
+                expectedCellCount.removeRow(rowPosToKey.get(1));
+                validateTable(conn, tableName, expectedCellCount);
+            }
         }
     }
 
@@ -582,7 +613,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
 
             // advance the time by maxlookbackwindow but still within ttl
             // only the last version is retained no bread crumbs
-            injectEdge.incrementValue(tableLevelMaxLooback + 2);
+            injectEdge.incrementValue(tableLevelMaxLookback + 2);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
             expectedCellCount.addRow(rowPosToKey.get(2), COLUMNS.length + 1);
@@ -608,7 +639,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
 
             // increment by atleast 2*maxlookback so that there are no updates within the
             // maxlookback window and no updates visible through the maxlookback window
-            injectEdge.incrementValue(2*tableLevelMaxLooback + 5);
+            injectEdge.incrementValue(2* tableLevelMaxLookback + 5);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
@@ -652,7 +683,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             assertEquals(rowCount, actual);
 
             // Advance time by the max lookback age. This will cause all rows in cdc index to expire
-            injectEdge.incrementValue(tableLevelMaxLooback + 2);
+            injectEdge.incrementValue(tableLevelMaxLookback + 2);
 
             // Major compact the CDC index. This will remove all expired rows
             TestUtil.doMajorCompaction(conn, cdcIndexName);
@@ -674,6 +705,13 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         } catch (AssertionError e) {
             try {
                 TestUtil.dumpTable(conn, TableName.valueOf(tableName));
+                for (Map.Entry<Integer, String> entry : rowPosToKey.entrySet()) {
+                    String rowKey = entry.getValue();
+                    LOG.info(String.format("Key=%s expected=%d, actual=%d",
+                            Bytes.toStringBinary(rowKey.getBytes()),
+                            expectedCellCount.getCellCount(rowKey),
+                            actualCellCount.getCellCount(rowKey)));
+                }
             } finally {
                 throw e;
             }
