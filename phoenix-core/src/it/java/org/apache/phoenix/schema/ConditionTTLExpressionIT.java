@@ -42,6 +42,7 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
 import org.apache.phoenix.end2end.ParallelStatsDisabledIT;
+import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixResultSet;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder.TableOptions;
@@ -49,6 +50,7 @@ import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.thirdparty.com.google.common.base.Joiner;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
+import org.apache.phoenix.util.CDCUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.ManualEnvironmentEdge;
 import org.apache.phoenix.util.PropertiesUtil;
@@ -617,6 +619,50 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                 }
             }
             validateTable(conn, tableName, expectedCellCount);
+        }
+    }
+
+    @Test
+    public void testCDCIndex() throws Exception {
+        String ttlCol = columns.get("VAL2");
+        // VAL2 = -1
+        String ttlExpression = String.format("%s = -1", ttlCol);
+        createTable(ttlExpression, false);
+        String tableName = schemaBuilder.getEntityTableName();
+        injectEdge();
+        int rowCount = 5;
+        long actual;
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String cdcName = generateUniqueName();
+            String cdc_sql = "CREATE CDC " + cdcName + " ON " + tableName;
+            conn.createStatement().execute(cdc_sql);
+            populateTable(conn, rowCount);
+            String schemaName = SchemaUtil.getSchemaNameFromFullName(tableName);
+            String cdcIndexName = SchemaUtil.getTableName(schemaName,
+                    CDCUtil.getCDCIndexName(cdcName));
+            PTable cdcIndex = ((PhoenixConnection) conn).getTableNoCache(cdcIndexName);
+            assertEquals(cdcIndex.getTTL(), TTLExpression.TTL_EXPRESSION_FORVER);
+
+            // get row count on base table no row should be masked
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount, actual);
+
+            // get raw row count on cdc index table
+            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(cdcIndexName));
+            assertEquals(rowCount, actual);
+
+            // Advance time by the max lookback age. This will cause all rows in cdc index to expire
+            injectEdge.incrementValue(tableLevelMaxLooback + 2);
+
+            // Major compact the CDC index. This will remove all expired rows
+            TestUtil.doMajorCompaction(conn, cdcIndexName);
+            // get raw row count on cdc index table
+            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(cdcIndexName));
+            assertEquals(0, actual);
+
+            // table should still have all the rows intact
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount, actual);
         }
     }
 
