@@ -128,6 +128,7 @@ import org.apache.phoenix.filter.SingleKeyValueComparisonFilter;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
+import org.apache.phoenix.jdbc.PhoenixResultSet;
 import org.apache.phoenix.jdbc.PhoenixStatement;
 import org.apache.phoenix.parse.FilterableStatement;
 import org.apache.phoenix.parse.SQLParser;
@@ -1227,10 +1228,23 @@ public class TestUtil {
         return rs.getLong(1);
     }
 
-    public static long getRowCount(Connection conn, String tableName, boolean skipIndex) throws SQLException {
+    public static long getRowCount(Connection conn, String tableName, boolean skipIndex)
+            throws SQLException {
         String query = String.format("SELECT %s count(*) FROM %s",
                 (skipIndex ? "/*+ NO_INDEX */" : ""), tableName);
         try(ResultSet rs = conn.createStatement().executeQuery(query)) {
+            assertTrue(rs.next());
+            return rs.getLong(1);
+        }
+    }
+
+    public static long getRowCountFromIndex(Connection conn, String tableName, String indexName)
+            throws SQLException {
+        String query = String.format("SELECT count(*) FROM %s", tableName);
+        try(ResultSet rs = conn.createStatement().executeQuery(query)) {
+            PhoenixResultSet prs = rs.unwrap(PhoenixResultSet.class);
+            String explainPlan = QueryUtil.getExplainPlan(prs.getUnderlyingIterator());
+            assertTrue(explainPlan.contains(indexName));
             assertTrue(rs.next());
             return rs.getLong(1);
         }
