@@ -975,7 +975,6 @@ public class TestUtil {
     }
 
     public static int getRawRowCount(Table table) throws IOException {
-        dumpTable(table);
         return getRowCount(table, true);
     }
 

@@ -17,6 +17,12 @@
  */
 package org.apache.phoenix.schema;
 
+import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_EXPIRED_INDEX_ROW_COUNT;
+import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT;
+import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_MISSING_INDEX_ROW_COUNT;
+import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_VALID_INDEX_ROW_COUNT;
+import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REPAIR_EXTRA_VERIFIED_INDEX_ROW_COUNT;
+import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.SCANNED_DATA_ROW_COUNT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -39,9 +45,13 @@ import java.util.Random;
 
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.mapreduce.Counter;
+import org.apache.hadoop.mapreduce.CounterGroup;
 import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
+import org.apache.phoenix.end2end.IndexToolIT;
 import org.apache.phoenix.end2end.ParallelStatsDisabledIT;
 import org.apache.phoenix.jdbc.PhoenixConnection;
+import org.apache.phoenix.mapreduce.index.IndexTool;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder.OtherOptions;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder.TableIndexOptions;
@@ -52,6 +62,8 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 import org.apache.phoenix.util.CDCUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
+import org.apache.phoenix.util.IndexUtil;
+import org.apache.phoenix.util.IndexUtilTest;
 import org.apache.phoenix.util.ManualEnvironmentEdge;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
@@ -519,6 +531,71 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             CellCount expectedCellCount = new CellCount();
             expectedCellCount.addRow(dataRowPosToKey.get(2), COLUMNS.length + 1);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
+        }
+    }
+
+    @Test
+    public void testIndexTool() throws Exception {
+        String ttlCol = columns.get("VAL5");
+        // ttl = '<FAMILY>.VAL4 = TRUE'
+        String ttlExpression = String.format("%s=TRUE", ttlCol);
+        createTable(ttlExpression);
+        String fullDataTableName = schemaBuilder.getEntityTableName();
+        String schemaName = SchemaUtil.getSchemaNameFromFullName(fullDataTableName);
+        String tableName = SchemaUtil.getTableNameFromFullName(fullDataTableName);
+        injectEdge();
+        int rowCount = 6;
+        long actual;
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            populateTable(conn, rowCount);
+            injectEdge.incrementValue(10);
+            // expire some rows
+            for (int i = 0; i < rowCount; i+=2) {
+                updateColumn(conn, i, ttlCol, true);
+            }
+            injectEdge.incrementValue(10);
+            // now create the index async
+            String indexName = generateUniqueName();
+            String fullIndexName = SchemaUtil.getTableName(schemaName, indexName);
+            String indexDDL = String.format("create index %s on %s (%s) include (%s) async",
+                    indexName, fullDataTableName, columns.get("VAL1"), ttlCol);
+            conn.createStatement().execute(indexDDL);
+            IndexToolIT.runIndexTool(false, schemaName, tableName, indexName);
+
+            // Both the tables should have the same row count from Phoenix
+            actual = TestUtil.getRowCount(conn, fullDataTableName, true);
+            assertEquals(rowCount/2, actual);
+            actual = TestUtil.getRowCountFromIndex(conn, fullDataTableName, fullIndexName);
+            assertEquals(rowCount/2, actual);
+
+            // The data table raw row count should include masked rows
+            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullDataTableName));
+            assertEquals(rowCount, actual);
+
+            // Since the index table was built after the rows were expired the raw row count
+            // will exclude the masked rows
+            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullIndexName));
+            assertEquals(rowCount/2, actual);
+
+            // run index verification
+            IndexTool it = IndexToolIT.runIndexTool(false, schemaName, tableName, indexName,
+                    null, 0, IndexTool.IndexVerifyType.BEFORE);
+            CounterGroup mrJobCounters = IndexToolIT.getMRJobCounters(it);
+            try {
+                assertEquals(rowCount / 2,
+                        mrJobCounters.findCounter(SCANNED_DATA_ROW_COUNT.name()).getValue());
+                assertEquals(rowCount / 2,
+                        mrJobCounters.findCounter(BEFORE_REBUILD_VALID_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(BEFORE_REBUILD_EXPIRED_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(BEFORE_REBUILD_MISSING_INDEX_ROW_COUNT.name()).getValue());
+            } catch (AssertionError e) {
+                IndexToolIT.dumpMRJobCounters(mrJobCounters);
+                throw e;
+            }
         }
     }
 
