@@ -24,6 +24,7 @@ import java.util.Map;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.phoenix.coprocessor.generated.PTableProtos;
 import org.apache.phoenix.expression.Expression;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
@@ -61,6 +62,31 @@ public abstract class TTLExpression {
         }
     }
 
+    public static TTLExpression create(byte[] phoenixTTL) throws IOException {
+        return createFromProto(PTableProtos.TTLExpression.parseFrom(phoenixTTL));
+    }
+
+    public static TTLExpression createFromProto(PTableProtos.TTLExpression ttlExpressionProto) throws IOException {
+        if (ttlExpressionProto.hasLiteral()) {
+                return LiteralTTLExpression.createFromProto(ttlExpressionProto.getLiteral());
+        }
+        if (ttlExpressionProto.hasCondition()) {
+            return ConditionTTLExpression.createFromProto(ttlExpressionProto.getCondition());
+        }
+        throw new RuntimeException("Unxexpected! Shouldn't reach here");
+    }
+
+    public byte[] getTTLForScanAttribute(PhoenixConnection connection,
+                                         PTable table) throws SQLException {
+        try {
+            PTableProtos.TTLExpression proto = toProto(connection, table);
+            return proto != null ? proto.toByteArray() : null;
+        } catch (IOException e) {
+            throw new SQLException(
+                    String.format("Error serializing %s as scan attribute", toString()), e);
+        }
+    }
+
     abstract public String getTTLExpression();
 
     abstract public long getTTLForRow(List<Cell> result);
@@ -71,10 +97,13 @@ public abstract class TTLExpression {
                                                CreateTableStatement create,
                                                Map<String, Object> tableProps) throws SQLException;
 
-    abstract public void validateTTLOnAlter(PhoenixConnection connection, PTable table) throws SQLException;
+    abstract public void validateTTLOnAlter(PhoenixConnection connection,
+                                            PTable table) throws SQLException;
 
-    abstract public String getTTLForScanAttribute();
+    abstract public Expression compileTTLExpression(PhoenixConnection connection,
+                                                    PTable table) throws IOException;
 
-    abstract public Expression compileTTLExpression(PhoenixConnection connection, PTable table) throws IOException;
+    abstract public PTableProtos.TTLExpression toProto(PhoenixConnection connection,
+                                                       PTable table) throws SQLException, IOException;
 
 }

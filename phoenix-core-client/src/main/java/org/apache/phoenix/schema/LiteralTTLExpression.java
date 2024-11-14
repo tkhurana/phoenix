@@ -24,9 +24,14 @@ import java.util.Map;
 import java.util.Objects;
 
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.phoenix.coprocessor.generated.PTableProtos;
 import org.apache.phoenix.expression.Expression;
 import org.apache.phoenix.jdbc.PhoenixConnection;
+import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.parse.CreateTableStatement;
+import org.apache.phoenix.schema.types.PVarchar;
 import org.apache.phoenix.thirdparty.com.google.common.base.Preconditions;
 
 public class LiteralTTLExpression extends TTLExpression {
@@ -72,21 +77,27 @@ public class LiteralTTLExpression extends TTLExpression {
     }
 
     @Override
-    public void validateTTLOnAlter(PhoenixConnection connection, PTable table) throws SQLException {
-
-    }
-
-    @Override
-    public String getTTLForScanAttribute() {
-        if (this.equals(TTLExpression.TTL_EXPRESSION_NOT_DEFINED)) {
-            return null;
-        }
-        return getTTLExpression();
-    }
+    public void validateTTLOnAlter(PhoenixConnection connection, PTable table) throws SQLException {}
 
     @Override
     public Expression compileTTLExpression(PhoenixConnection connection, PTable table) throws IOException {
         return null;
+    }
+
+    public static LiteralTTLExpression createFromProto(PTableProtos.LiteralTTL literal) {
+        return new LiteralTTLExpression(literal.getTtlValue());
+    }
+
+    @Override
+    public PTableProtos.TTLExpression toProto(PhoenixConnection connection, PTable table) throws SQLException, IOException {
+        if (this.equals(TTLExpression.TTL_EXPRESSION_NOT_DEFINED)) {
+            return null;
+        }
+        PTableProtos.TTLExpression.Builder ttl = PTableProtos.TTLExpression.newBuilder();
+        PTableProtos.LiteralTTL.Builder literal = PTableProtos.LiteralTTL.newBuilder();
+        literal.setTtlValue(ttlValue);
+        ttl.setLiteral(literal.build());
+        return ttl.build();
     }
 
     public int getTTLValue() {

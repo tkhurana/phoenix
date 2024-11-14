@@ -55,6 +55,7 @@ import org.junit.runners.Parameterized.Parameters;
 import org.apache.phoenix.thirdparty.com.google.common.base.Function;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Arrays;
@@ -486,7 +487,7 @@ public class ScanUtilTest {
     public static class PhoenixTTLScanUtilTest extends BaseConnectionlessQueryTest {
 
         @Test
-        public void testPhoenixTTLUtilMethods() throws SQLException {
+        public void testPhoenixTTLUtilMethods() throws SQLException, IOException {
             Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
             try (Connection conn = driver.connect(getUrl(), props)) {
                 PhoenixConnection phxConn = conn.unwrap(PhoenixConnection.class);

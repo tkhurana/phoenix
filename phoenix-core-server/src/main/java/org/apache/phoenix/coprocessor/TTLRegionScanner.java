@@ -64,7 +64,7 @@ public class TTLRegionScanner extends BaseRegionScanner {
     private boolean initialized = false;
 
     public TTLRegionScanner(final RegionCoprocessorEnvironment env, final Scan scan,
-            final RegionScanner s) {
+            final RegionScanner s) throws IOException {
         super(s);
         this.env = env;
         this.scan = scan;

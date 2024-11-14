@@ -22,10 +22,17 @@ import static org.apache.phoenix.schema.PTable.ImmutableStorageScheme.ONE_CELL_P
 import static org.apache.phoenix.schema.PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS;
 import static org.apache.phoenix.util.SchemaUtil.isPKColumn;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInput;
+import java.io.DataInputStream;
+import java.io.DataOutput;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -34,17 +41,24 @@ import java.util.Set;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
+import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.io.WritableUtils;
 import org.apache.phoenix.compile.ColumnResolver;
 import org.apache.phoenix.compile.ExpressionCompiler;
 import org.apache.phoenix.compile.FromCompiler;
 import org.apache.phoenix.compile.IndexStatementRewriter;
 import org.apache.phoenix.compile.StatementContext;
 import org.apache.phoenix.compile.WhereCompiler.WhereExpressionCompiler;
+import org.apache.phoenix.coprocessor.generated.PTableProtos;
+import org.apache.phoenix.coprocessor.generated.ServerCachingProtos;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.SQLExceptionInfo;
 import org.apache.phoenix.expression.Expression;
+import org.apache.phoenix.expression.ExpressionType;
 import org.apache.phoenix.expression.KeyValueColumnExpression;
+import org.apache.phoenix.hbase.index.covered.update.ColumnReference;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixStatement;
 import org.apache.phoenix.parse.ColumnDef;
@@ -58,20 +72,28 @@ import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.schema.tuple.MultiKeyValueTuple;
 import org.apache.phoenix.schema.types.PBoolean;
 import org.apache.phoenix.schema.types.PDataType;
+import org.apache.phoenix.thirdparty.com.google.common.collect.Sets;
 import org.apache.phoenix.util.SchemaUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.google.common.collect.Sets;
 
 public class ConditionTTLExpression extends TTLExpression {
     private static final Logger LOGGER = LoggerFactory.getLogger(ConditionTTLExpression.class);
 
     private final String ttlExpr;
-    private Expression conditionExpr;
+    private Expression compiledExpr;
+    private Set<ColumnReference> conditionExprColumns;
 
     public ConditionTTLExpression(String ttlExpr) {
         this.ttlExpr = ttlExpr;
+    }
+
+    private ConditionTTLExpression(String ttlExpr,
+                                   Expression compiledExpression,
+                                   Set<ColumnReference> conditionExprColumns) {
+        this.ttlExpr = ttlExpr;
+        this.compiledExpr = compiledExpression;
+        this.conditionExprColumns = conditionExprColumns;
     }
 
     @Override
@@ -143,7 +165,7 @@ public class ConditionTTLExpression extends TTLExpression {
      */
     public long getTTLForRow(List<Cell> result) {
         long ttl = DEFAULT_TTL;
-        if (conditionExpr == null) {
+        if (compiledExpr == null) {
             throw new RuntimeException(
                     String.format("Condition TTL Expression %s not compiled", this.ttlExpr));
         }
@@ -153,7 +175,7 @@ public class ConditionTTLExpression extends TTLExpression {
             return ttl;
         }
         MultiKeyValueTuple row = new MultiKeyValueTuple(latestRowVersion);
-        if (conditionExpr.evaluate(row, ptr)) {
+        if (compiledExpr.evaluate(row, ptr)) {
             Boolean isExpired = (Boolean) PBoolean.INSTANCE.toObject(ptr);
             ttl = isExpired ? 0 : DEFAULT_TTL;
         } else {
@@ -193,11 +215,58 @@ public class ConditionTTLExpression extends TTLExpression {
         validateTTLExpression(ttlExpression, expressionCompiler);
     }
 
-    @Override
-    public String getTTLForScanAttribute() {
-        // Conditional TTL is not sent as a scan attribute
-        // Masking is implemented using query re-write
-        return null;
+    private byte[] serializeExpression() throws IOException {
+        try (ByteArrayOutputStream stream = new ByteArrayOutputStream()) {
+            DataOutput output = new DataOutputStream(stream);
+            WritableUtils.writeVInt(output, ExpressionType.valueOf(compiledExpr).ordinal());
+            compiledExpr.write(output);
+            return stream.toByteArray();
+        }
+    }
+
+    private static Expression deSerializeExpression(byte[] serializedExpr) throws IOException {
+        try (ByteArrayInputStream stream = new ByteArrayInputStream(serializedExpr)) {
+            DataInput input = new DataInputStream(stream);
+            int expressionOrdinal = WritableUtils.readVInt(input);
+            Expression expression = ExpressionType.values()[expressionOrdinal].newInstance();
+            expression.readFields(input);
+            return expression;
+        }
+    }
+
+    public static ConditionTTLExpression createFromProto(PTableProtos.ConditionTTL condition)
+            throws IOException {
+        String ttlExpr = condition.getTtlExpression();
+        Expression compiledExpression = deSerializeExpression(
+                condition.getCompiledExpression().toByteArray());
+        List<ServerCachingProtos.ColumnReference> exprColumnsList =
+                condition.getTtlExpressionColumnsList();
+        Set<ColumnReference> conditionExprColumns = new HashSet<>(exprColumnsList.size());
+        for (ServerCachingProtos.ColumnReference colRefFromProto : exprColumnsList) {
+            conditionExprColumns.add(new ColumnReference(
+                    colRefFromProto.getFamily().toByteArray(),
+                    colRefFromProto.getQualifier().toByteArray()));
+        }
+        return new ConditionTTLExpression(ttlExpr, compiledExpression, conditionExprColumns);
+    }
+
+    public PTableProtos.TTLExpression toProto(PhoenixConnection connection,
+                                              PTable table) throws SQLException, IOException {
+        // lazily build the expression
+        buildTTLExpression(connection, table);
+        PTableProtos.TTLExpression.Builder ttl = PTableProtos.TTLExpression.newBuilder();
+        PTableProtos.ConditionTTL.Builder condition = PTableProtos.ConditionTTL.newBuilder();
+        condition.setTtlExpression(ttlExpr);
+        condition.setCompiledExpression(ByteStringer.wrap(serializeExpression()));
+        for (ColumnReference colRef : conditionExprColumns) {
+            ServerCachingProtos.ColumnReference.Builder cRefBuilder =
+                    ServerCachingProtos.ColumnReference.newBuilder();
+            cRefBuilder.setFamily(ByteStringer.wrap(colRef.getFamily()));
+            cRefBuilder.setQualifier(ByteStringer.wrap(colRef.getQualifier()));
+            condition.addTtlExpressionColumns(cRefBuilder.build());
+        }
+        ttl.setCondition(condition.build());
+        return ttl.build();
     }
 
     public ParseNode parseExpression(PhoenixConnection connection,
@@ -235,12 +304,34 @@ public class ConditionTTLExpression extends TTLExpression {
             ParseNode ttlCondition = parseExpression(connection, table);
             ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
             StatementContext context = new StatementContext(new PhoenixStatement(connection), resolver);
-            ExpressionCompiler expressionCompiler = new ExpressionCompiler(context);
-            conditionExpr = ttlCondition.accept(expressionCompiler);
-            return conditionExpr;
+            WhereExpressionCompiler expressionCompiler = new WhereExpressionCompiler(context);
+            compiledExpr = ttlCondition.accept(expressionCompiler);
+            for (Pair<byte[], byte[]> column : context.getWhereConditionColumns()) {
+                conditionExprColumns.add(new ColumnReference(column.getFirst(), column.getSecond()));
+            }
+            return compiledExpr;
         } catch (SQLException e) {
             throw new IOException(e);
         }
+    }
+
+    public synchronized Expression buildTTLExpression(PhoenixConnection connection,
+                                                PTable table) throws SQLException {
+        if (compiledExpr == null) {
+            ParseNode ttlCondition = parseExpression(connection, table);
+            ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
+            StatementContext context = new StatementContext(
+                    new PhoenixStatement(connection), resolver);
+            WhereExpressionCompiler expressionCompiler = new WhereExpressionCompiler(context);
+            compiledExpr = ttlCondition.accept(expressionCompiler);
+            conditionExprColumns =
+                    Sets.newHashSetWithExpectedSize(context.getWhereConditionColumns().size());
+            for (Pair<byte[], byte[]> column : context.getWhereConditionColumns()) {
+                conditionExprColumns.add(
+                        new ColumnReference(column.getFirst(), column.getSecond()));
+            }
+        }
+        return compiledExpr;
     }
 
     /**

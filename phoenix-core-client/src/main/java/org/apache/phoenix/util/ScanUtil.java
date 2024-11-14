@@ -1149,14 +1149,25 @@ public class ScanUtil {
     }
 
 
-    public static int getTTL(Scan scan) {
+    public static int getTTL(Scan scan) throws IOException {
         byte[] phoenixTTL = scan.getAttribute(BaseScannerRegionObserverConstants.TTL);
         if (phoenixTTL == null) {
             return DEFAULT_TTL;
         }
-        String ttlStr = (String) PVarchar.INSTANCE.toObject(phoenixTTL);
-        LiteralTTLExpression literal = (LiteralTTLExpression) TTLExpression.create(ttlStr);
-        return literal.getTTLValue();
+        TTLExpression ttlExpression = TTLExpression.create(phoenixTTL);
+        if (ttlExpression instanceof  LiteralTTLExpression) {
+            LiteralTTLExpression literal = (LiteralTTLExpression)ttlExpression;
+            return literal.getTTLValue();
+        }
+        return DEFAULT_TTL;
+    }
+
+    public static TTLExpression getTTLExpression(Scan scan) throws IOException {
+        byte[] phoenixTTL = scan.getAttribute(BaseScannerRegionObserverConstants.TTL);
+        if (phoenixTTL == null) {
+            return TTLExpression.TTL_EXPRESSION_FORVER;
+        }
+        return TTLExpression.create(phoenixTTL);
     }
 
     public static boolean isPhoenixTableTTLEnabled(Configuration conf) {
@@ -1197,7 +1208,7 @@ public class ScanUtil {
         return maxTs;
     }
 
-    public static boolean isTTLExpired(Cell cell, Scan scan, long nowTS) {
+    public static boolean isTTLExpired(Cell cell, Scan scan, long nowTS) throws IOException {
         long ts = cell.getTimestamp();
         int ttl = ScanUtil.getTTL(scan);
         return ts + ttl < nowTS;
@@ -1428,8 +1439,8 @@ public class ScanUtil {
                 return;
             }
         }
-        TTLExpression ttlExpr = dataTable.getTTL();
-        String ttlForScan = ttlExpr.getTTLForScanAttribute();
+        TTLExpression ttlExpr = table.getTTL();
+        byte[] ttlForScan = ttlExpr.getTTLForScanAttribute(phoenixConnection, table);
         if (ttlForScan != null) {
             byte[] emptyColumnFamilyName = SchemaUtil.getEmptyColumnFamily(table);
             byte[] emptyColumnName =
@@ -1440,7 +1451,7 @@ public class ScanUtil {
                     Bytes.toBytes(tableName));
             scan.setAttribute(BaseScannerRegionObserverConstants.EMPTY_COLUMN_FAMILY_NAME, emptyColumnFamilyName);
             scan.setAttribute(BaseScannerRegionObserverConstants.EMPTY_COLUMN_QUALIFIER_NAME, emptyColumnName);
-            scan.setAttribute(BaseScannerRegionObserverConstants.TTL, Bytes.toBytes(ttlForScan));
+            scan.setAttribute(BaseScannerRegionObserverConstants.TTL, ttlForScan);
             if (!ScanUtil.isDeleteTTLExpiredRows(scan)) {
                 scan.setAttribute(BaseScannerRegionObserverConstants.MASK_PHOENIX_TTL_EXPIRED, PDataType.TRUE_BYTES);
             }

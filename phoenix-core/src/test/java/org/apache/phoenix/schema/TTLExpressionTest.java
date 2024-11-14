@@ -20,11 +20,27 @@ package org.apache.phoenix.schema;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 
+import java.sql.SQLException;
+
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
+import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
 public class TTLExpressionTest {
+
+    @Mock
+    private PhoenixConnection pconn;
+    @Mock
+    private PTable table;
+
+    @Before
+    public void setup() {
+        MockitoAnnotations.initMocks(this);
+    }
 
     @Test
     public void testLiteralExpression() {
@@ -43,12 +59,12 @@ public class TTLExpressionTest {
     }
 
     @Test
-    public void testNone() {
+    public void testNone() throws SQLException {
         assertEquals(TTLExpression.TTL_EXPRESSION_NOT_DEFINED,
                 TTLExpression.create(PhoenixDatabaseMetaData.NONE_TTL));
         assertEquals(TTLExpression.TTL_EXPRESSION_NOT_DEFINED,
                 TTLExpression.create(PhoenixDatabaseMetaData.TTL_NOT_DEFINED));
-        assertNull(TTLExpression.TTL_EXPRESSION_NOT_DEFINED.getTTLForScanAttribute());
+        assertNull(TTLExpression.TTL_EXPRESSION_NOT_DEFINED.getTTLForScanAttribute(pconn, table));
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -57,12 +73,11 @@ public class TTLExpressionTest {
     }
 
     @Test
-    public void testConditionalExpression() {
+    public void testConditionalExpression() throws SQLException {
         String ttl = "PK1 = 5 AND COL1 > 'abc'";
         ConditionTTLExpression expected = new ConditionTTLExpression(ttl);
         TTLExpression actual = TTLExpression.create(ttl);
         assertEquals(expected, actual);
         assertEquals(ttl, expected.getTTLExpression());
-        assertNull(actual.getTTLForScanAttribute());
     }
 }
