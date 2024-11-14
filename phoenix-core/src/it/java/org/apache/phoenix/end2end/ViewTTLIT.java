@@ -74,12 +74,15 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -100,7 +103,22 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
 @Category(NeedsOwnMiniClusterTest.class)
+@RunWith(Parameterized.class)
 public class ViewTTLIT extends BaseViewTTLIT {
+
+    private boolean useCondExpression;
+
+    @Parameterized.Parameters(name = "useCondExpression={0}")
+    public static synchronized Collection<Boolean[]> data() {
+        return Arrays.asList(new Boolean[][]{
+                {false}, {true}
+        });
+    }
+
+    public ViewTTLIT(boolean useCondExpression) {
+        super();
+        this.useCondExpression = useCondExpression;
+    }
 
     @BeforeClass
     public static void doSetup() throws Exception {
@@ -111,7 +129,6 @@ public class ViewTTLIT extends BaseViewTTLIT {
             put("hbase.procedure.remote.dispatcher.delay.msec", "0");
             // no max lookback
             put(BaseScannerRegionObserverConstants.PHOENIX_MAX_LOOKBACK_AGE_CONF_KEY, Integer.toString(0));
-            put(QueryServices.PHOENIX_VIEW_TTL_ENABLED, Boolean.toString(true));
             put(QueryServices.PHOENIX_VIEW_TTL_TENANT_VIEWS_PER_SCAN_LIMIT, String.valueOf(1));
         }};
 
@@ -199,7 +216,8 @@ public class ViewTTLIT extends BaseViewTTLIT {
 
         TenantViewOptions tenantViewOptions = TenantViewOptions.withDefaults();
         // View TTL is set to 120s => 120000 ms
-        tenantViewOptions.setTableProps(String.format("TTL=%d", VIEW_TTL_120_SECS));
+        tenantViewOptions.setTableProps(String.format("TTL='%s'",
+                getTTLExpression(VIEW_TTL_120_SECS)));
 
         final SchemaBuilder schemaBuilder = createLevel1TenantView(tenantViewOptions, null);
         String tenantId = schemaBuilder.getDataOptions().getTenantId();
@@ -1135,6 +1153,17 @@ public class ViewTTLIT extends BaseViewTTLIT {
         }
     }
 
+    /**
+     *
+     * @param ttl in seconds
+     * @return
+     */
+    private String getTTLExpression(int ttl) {
+        return useCondExpression ? String.format(
+                "TO_NUMBER(CURRENT_TIME()) - TO_NUMBER(PHOENIX_ROW_TIMESTAMP()) >= %d", ttl*1000)
+            : String.valueOf(ttl);
+    }
+
     @Test
     public void testWithVariousSQLsForMultipleTenants() throws Exception {
 
@@ -1145,7 +1174,7 @@ public class ViewTTLIT extends BaseViewTTLIT {
         tableOptions.getTableColumnTypes().clear();
 
         GlobalViewOptions globalViewOptions = SchemaBuilder.GlobalViewOptions.withDefaults();
-        globalViewOptions.setTableProps(String.format("TTL=%d", viewTTL));
+        globalViewOptions.setTableProps(String.format("TTL='%s'", getTTLExpression(viewTTL)));
 
         GlobalViewIndexOptions globalViewIndexOptions =
                 SchemaBuilder.GlobalViewIndexOptions.withDefaults();
@@ -1252,7 +1281,7 @@ public class ViewTTLIT extends BaseViewTTLIT {
         tenantViewOptions
                 .setTenantViewColumnTypes(asList("CHAR(15)", "VARCHAR", "VARCHAR", "VARCHAR"));
 
-        tenantViewOptions.setTableProps(String.format("TTL=%d", viewTTL));
+        tenantViewOptions.setTableProps(String.format("TTL='%s'", getTTLExpression(viewTTL)));
 
         OtherOptions testCaseWhenAllCFMatchAndAllDefault = new OtherOptions();
         testCaseWhenAllCFMatchAndAllDefault.setTestName("testCaseWhenAllCFMatchAndAllDefault");
@@ -1339,7 +1368,7 @@ public class ViewTTLIT extends BaseViewTTLIT {
     @Test
     public void testGlobalAndTenantViewTTLInheritance1() throws Exception {
         // View TTL is set in seconds (for e.g 200 secs)
-        long tenantPhoenixTTL = 200;
+        int tenantPhoenixTTL = 200;
 
         // Define the test schema.
         // 1. Table with default columns => (ORG_ID, KP, COL1, COL2, COL3), PK => (ORG_ID, KP)
@@ -1361,7 +1390,8 @@ public class ViewTTLIT extends BaseViewTTLIT {
         tenantViewWithOverrideOptions.setTenantViewColumns(asList("ZID", "COL7", "COL8", "COL9"));
         tenantViewWithOverrideOptions
                 .setTenantViewColumnTypes(asList("CHAR(15)", "VARCHAR", "VARCHAR", "VARCHAR"));
-        tenantViewWithOverrideOptions.setTableProps(String.format("TTL=%d", tenantPhoenixTTL));
+        tenantViewWithOverrideOptions.setTableProps(String.format("TTL='%s'",
+                getTTLExpression(tenantPhoenixTTL)));
 
         OtherOptions testCaseWhenAllCFMatchAndAllDefault = new OtherOptions();
         testCaseWhenAllCFMatchAndAllDefault.setTestName("testCaseWhenAllCFMatchAndAllDefault");

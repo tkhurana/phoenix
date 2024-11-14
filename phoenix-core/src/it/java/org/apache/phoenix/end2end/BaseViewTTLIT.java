@@ -402,7 +402,7 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
 
     void validateExpiredRowsAreNotReturnedUsingCounts(long viewTTL, DataReader dataReader,
             SchemaBuilder schemaBuilder) throws IOException, SQLException {
-
+        EnvironmentEdgeManager.reset();
         String tenantConnectUrl =
                 getUrl() + ';' + TENANT_ID_ATTRIB + '=' + schemaBuilder.getDataOptions().getTenantId();
 
@@ -417,9 +417,11 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
         }
 
         // Verify after TTL expiration
-        long scnTimestamp = EnvironmentEdgeManager.currentTimeMillis();
+        long scnTimestamp = EnvironmentEdgeManager.currentTimeMillis() + (2 * viewTTL * 1000);
         Properties props = new Properties();
-        props.setProperty("CurrentSCN", Long.toString(scnTimestamp + (2 * viewTTL * 1000)));
+        props.setProperty("CurrentSCN", Long.toString(scnTimestamp));
+        injectEdge.setValue(scnTimestamp);
+        EnvironmentEdgeManager.injectEdge(injectEdge);
         try (Connection readConnection = DriverManager.getConnection(tenantConnectUrl, props)) {
 
             dataReader.setConnection(readConnection);
@@ -429,12 +431,13 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
             assertEquals("Expired rows should not be fetched", 0,
                     fetchedData.rowKeySet().size());
         }
+        EnvironmentEdgeManager.reset();
     }
 
     void validateExpiredRowsAreNotReturnedUsingData(long viewTTL,
             org.apache.phoenix.thirdparty.com.google.common.collect.Table<String, String, Object> upsertedData,
             DataReader dataReader, SchemaBuilder schemaBuilder) throws SQLException {
-
+        EnvironmentEdgeManager.reset();
         String tenantConnectUrl =
                 getUrl() + ';' + TENANT_ID_ATTRIB + '=' + schemaBuilder.getDataOptions().getTenantId();
 
@@ -443,6 +446,8 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
         long scnTimestamp = EnvironmentEdgeManager.currentTimeMillis() + 1;
         props.setProperty("CurrentSCN", Long.toString(scnTimestamp));
         props.setProperty(QueryServices.COLLECT_REQUEST_LEVEL_METRICS, String.valueOf(true));
+        injectEdge.setValue(scnTimestamp);
+        EnvironmentEdgeManager.injectEdge(injectEdge);
         try (Connection readConnection = DriverManager.getConnection(tenantConnectUrl, props)) {
 
             dataReader.setConnection(readConnection);
@@ -457,6 +462,7 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
 
         // Verify after TTL expiration
         props.setProperty("CurrentSCN", Long.toString(scnTimestamp + (2 * viewTTL * 1000)));
+        injectEdge.setValue(scnTimestamp + (2 * viewTTL * 1000));
         try (Connection readConnection = DriverManager.getConnection(tenantConnectUrl, props)) {
 
             dataReader.setConnection(readConnection);
@@ -466,12 +472,12 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
             assertNotNull("Fetched data should not be null", fetchedData);
             assertEquals("Expired rows should not be fetched", 0, fetchedData.rowKeySet().size());
         }
-
+        EnvironmentEdgeManager.reset();
     }
 
     void validateRowsAreNotMaskedUsingCounts(long probeTimestamp, DataReader dataReader,
             SchemaBuilder schemaBuilder) throws SQLException {
-
+        EnvironmentEdgeManager.reset();
         String tenantConnectUrl =
                 getUrl() + ';' + TENANT_ID_ATTRIB + '=' + schemaBuilder.getDataOptions()
                         .getTenantId();
@@ -480,6 +486,8 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
         long scnTimestamp = EnvironmentEdgeManager.currentTimeMillis() + 1;
         Properties props = new Properties();
         props.setProperty("CurrentSCN", Long.toString(scnTimestamp ));
+        injectEdge.setValue(scnTimestamp);
+        EnvironmentEdgeManager.injectEdge(injectEdge);
         try (Connection readConnection = DriverManager.getConnection(tenantConnectUrl, props)) {
 
             dataReader.setConnection(readConnection);
@@ -493,6 +501,7 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
 
         // Verify rows exists (not masked) at probed timestamp
         props.setProperty("CurrentSCN", Long.toString(probeTimestamp));
+        injectEdge.setValue(probeTimestamp);
         try (Connection readConnection = DriverManager.getConnection(tenantConnectUrl, props)) {
 
             dataReader.setConnection(readConnection);
@@ -503,6 +512,7 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
             assertTrue("Rows should exists before ttl expiration (probe-timestamp)",
                     fetchedData.rowKeySet().size() > 0);
         }
+        EnvironmentEdgeManager.reset();
     }
 
     static void verifyRowsBeforeTTLExpiration(
