@@ -554,6 +554,8 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                 updateColumn(conn, i, ttlCol, true);
             }
             injectEdge.incrementValue(10);
+            updateColumn(conn, 2, ttlCol, false);
+            injectEdge.incrementValue(10);
             // now create the index async
             String indexName = generateUniqueName();
             String fullIndexName = SchemaUtil.getTableName(schemaName, indexName);
@@ -561,12 +563,13 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                     indexName, fullDataTableName, columns.get("VAL1"), ttlCol);
             conn.createStatement().execute(indexDDL);
             IndexToolIT.runIndexTool(false, schemaName, tableName, indexName);
+            TestUtil.dumpTable(conn, TableName.valueOf(fullIndexName));
 
             // Both the tables should have the same row count from Phoenix
             actual = TestUtil.getRowCount(conn, fullDataTableName, true);
-            assertEquals(rowCount/2, actual);
+            assertEquals(rowCount/2 + 1, actual);
             actual = TestUtil.getRowCountFromIndex(conn, fullDataTableName, fullIndexName);
-            assertEquals(rowCount/2, actual);
+            assertEquals(rowCount/2 + 1, actual);
 
             // The data table raw row count should include masked rows
             actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullDataTableName));
@@ -575,16 +578,16 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             // Since the index table was built after the rows were expired the raw row count
             // will exclude the masked rows
             actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullIndexName));
-            assertEquals(rowCount/2, actual);
+            assertEquals(rowCount/2 + 1, actual);
 
             // run index verification
             IndexTool it = IndexToolIT.runIndexTool(false, schemaName, tableName, indexName,
                     null, 0, IndexTool.IndexVerifyType.BEFORE);
             CounterGroup mrJobCounters = IndexToolIT.getMRJobCounters(it);
             try {
-                assertEquals(rowCount / 2,
+                assertEquals(rowCount / 2 + 1,
                         mrJobCounters.findCounter(SCANNED_DATA_ROW_COUNT.name()).getValue());
-                assertEquals(rowCount / 2,
+                assertEquals(rowCount / 2 + 1,
                         mrJobCounters.findCounter(BEFORE_REBUILD_VALID_INDEX_ROW_COUNT.name()).getValue());
                 assertEquals(0,
                         mrJobCounters.findCounter(BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT.name()).getValue());
