@@ -29,14 +29,17 @@ import static org.junit.Assert.fail;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.List;
 
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.phoenix.compile.OrderByCompiler;
+import org.apache.phoenix.compile.QueryCompilerTest;
 import org.apache.phoenix.compile.QueryPlan;
 import org.apache.phoenix.exception.PhoenixParserException;
 import org.apache.phoenix.exception.SQLExceptionCode;
+import org.apache.phoenix.execute.HashJoinPlan;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.jdbc.PhoenixStatement;
@@ -441,6 +444,32 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
             scan = plan.getContext().getScan();
             filter = scan.getFilter();
             assertEquals(filter.toString(), "NOT (\"V2\" = 'EXPIRED')");
+        }
+    }
+
+    @Test
+    public void testSubQuery() throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(
+                    "CREATE TABLE t1 (k1 INTEGER NOT NULL PRIMARY KEY, v1 VARCHAR, v2 VARCHAR) " +
+                            "TTL='v2=''EXPIRED'''");
+            conn.createStatement().execute(
+                    "CREATE TABLE t2 (k2 INTEGER NOT NULL PRIMARY KEY, v3 VARCHAR, v4 INTEGER) " +
+                            "TTL='v4=-1'");
+            String query = "SELECT * FROM t1 where v1 IN (SELECT v3 from t2)";
+            PhoenixStatement stmt = conn.createStatement().unwrap(PhoenixStatement.class);
+            QueryPlan plan = stmt.optimizeQuery(query);
+            assertTrue(plan instanceof HashJoinPlan);
+            List<QueryPlan> childPlans = plan.accept(new QueryCompilerTest.MultipleChildrenExtractor());
+            assertEquals(childPlans.size(), 2);
+            QueryPlan plan1 = childPlans.get(0);
+            Scan scan1 = plan1.getContext().getScan();
+            Filter filter1 = scan1.getFilter();
+            assertEquals(filter1.toString(), "NOT (V2 = 'EXPIRED')");
+            QueryPlan plan2 = childPlans.get(1);
+            Scan scan2 = plan2.getContext().getScan();
+            Filter filter2 = scan2.getFilter();
+            assertEquals(filter2.toString(), "NOT (V4 = -1)");
         }
     }
 }

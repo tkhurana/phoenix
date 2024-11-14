@@ -5169,7 +5169,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         }
     }
 
-    private static class MultipleChildrenExtractor implements QueryPlanVisitor<List<QueryPlan>> {
+    public static class MultipleChildrenExtractor implements QueryPlanVisitor<List<QueryPlan>> {
 
         @Override
         public List<QueryPlan> defaultReturn(QueryPlan plan) {
