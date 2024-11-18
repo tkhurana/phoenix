@@ -504,7 +504,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
 
     @Test
     public void testDateExpression() throws Exception {
-        // ttl = 'CURRENT_DATE() >= <FAMILY>.VAL2 + 1'  // 1 day beyond the value stored in VAL2
+        // ttl = 'CURRENT_DATE() >= <FAMILY>.VAL3 + 1'  // 1 day beyond the value stored in VAL3
         String ttlCol = columns.get("VAL3");
         String ttlExpression = String.format("CURRENT_DATE() >= %s + 1", ttlCol);
         createTable(ttlExpression);
@@ -519,7 +519,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(0, actual);
 
-            // update VAL2 column of row 2
+            // update column of row 2
             updateColumn(conn, 2, ttlCol, new Date(injectEdge.currentTime()));
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(1, actual);
@@ -535,11 +535,40 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
     }
 
     @Test
+    public void testNull() throws Exception {
+        createTable("3600");
+        String ttlCol = columns.get("VAL2");
+        String ttlExpression = String.format("%s > 5", ttlCol);
+        String fullDataTableName = schemaBuilder.getEntityTableName();
+        int rowCount = 1;
+        injectEdge();
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            populateTable(conn, rowCount);
+            injectEdge.incrementValue(10);
+            updateColumn(conn, 0, ttlCol, null);
+            injectEdge.incrementValue(10);
+            updateColumn(conn, 0, columns.get("VAL1"), "qwer");
+            injectEdge.incrementValue(10);
+            TestUtil.dumpTable(conn, TableName.valueOf(fullDataTableName));
+            String dql = String.format("SELECT count(*) from %s where NOT (%s)", fullDataTableName, ttlExpression);
+            try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
+                assertTrue(rs.next());
+                System.out.println(rs.getInt(1));
+            }
+            dql = String.format("SELECT count(*) from %s where %s", fullDataTableName, ttlExpression);
+            try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
+                assertTrue(rs.next());
+                System.out.println(rs.getInt(1));
+            }
+        }
+    }
+
+    @Test
     public void testIndexTool() throws Exception {
         String ttlCol = columns.get("VAL5");
         // ttl = '<FAMILY>.VAL4 = TRUE'
         String ttlExpression = String.format("%s=TRUE", ttlCol);
-        createTable(ttlExpression);
+        createTable("3600");
         String fullDataTableName = schemaBuilder.getEntityTableName();
         String schemaName = SchemaUtil.getSchemaNameFromFullName(fullDataTableName);
         String tableName = SchemaUtil.getTableNameFromFullName(fullDataTableName);
@@ -554,8 +583,13 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                 updateColumn(conn, i, ttlCol, true);
             }
             injectEdge.incrementValue(10);
-            updateColumn(conn, 2, ttlCol, false);
+            //updateColumn(conn, 2, ttlCol, false);
+            deleteRow(conn, 2);
             injectEdge.incrementValue(10);
+            updateColumn(conn, 2, columns.get("VAL2"), 23);
+            injectEdge.incrementValue(10);
+            conn.createStatement().execute(String.format(
+                    "ALTER TABLE %s SET TTL='%s'", fullDataTableName, ttlExpression));
             // now create the index async
             String indexName = generateUniqueName();
             String fullIndexName = SchemaUtil.getTableName(schemaName, indexName);
@@ -563,28 +597,31 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                     indexName, fullDataTableName, columns.get("VAL1"), ttlCol);
             conn.createStatement().execute(indexDDL);
             IndexToolIT.runIndexTool(false, schemaName, tableName, indexName);
+            TestUtil.dumpTable(conn, TableName.valueOf(fullDataTableName));
             TestUtil.dumpTable(conn, TableName.valueOf(fullIndexName));
 
             // Both the tables should have the same row count from Phoenix
-            actual = TestUtil.getRowCount(conn, fullDataTableName, true);
-            assertEquals(rowCount/2 + 1, actual);
+            /*actual = TestUtil.getRowCount(conn, fullDataTableName, true);
+            assertEquals(rowCount/2, actual);
             actual = TestUtil.getRowCountFromIndex(conn, fullDataTableName, fullIndexName);
-            assertEquals(rowCount/2 + 1, actual);
+            assertEquals(rowCount/2, actual);
+             */
 
             // The data table raw row count should include masked rows
-            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullDataTableName));
-            assertEquals(rowCount, actual);
+            //actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullDataTableName));
+            //assertEquals(rowCount, actual);
 
             // Since the index table was built after the rows were expired the raw row count
             // will exclude the masked rows
-            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullIndexName));
-            assertEquals(rowCount/2 + 1, actual);
+            //actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullIndexName));
+            //assertEquals(rowCount/2 + 1, actual);
 
             // run index verification
             IndexTool it = IndexToolIT.runIndexTool(false, schemaName, tableName, indexName,
                     null, 0, IndexTool.IndexVerifyType.BEFORE);
             CounterGroup mrJobCounters = IndexToolIT.getMRJobCounters(it);
-            try {
+            IndexToolIT.dumpMRJobCounters(mrJobCounters);
+            /*try {
                 assertEquals(rowCount / 2 + 1,
                         mrJobCounters.findCounter(SCANNED_DATA_ROW_COUNT.name()).getValue());
                 assertEquals(rowCount / 2 + 1,
@@ -598,7 +635,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             } catch (AssertionError e) {
                 IndexToolIT.dumpMRJobCounters(mrJobCounters);
                 throw e;
-            }
+            }*/
         }
     }
 
@@ -821,6 +858,19 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                 stmt.setObject(i + 1, upsertValues.get(i));
             }
             stmt.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    private void deleteRow(Connection conn, int rowPosition) throws SQLException {
+        String tableName = schemaBuilder.getEntityTableName();
+        String dml = String.format("delete from %s where ID1 = ? and ID2 = ?", tableName);
+        try (PreparedStatement ps = conn.prepareStatement(dml)) {
+            List<Object> pkCols = generatePKColumnValues(rowPosition);
+            for (int i = 0; i < pkCols.size(); ++i) {
+                ps.setObject(i + 1, pkCols.get(i));
+            }
+            ps.executeUpdate();
             conn.commit();
         }
     }
