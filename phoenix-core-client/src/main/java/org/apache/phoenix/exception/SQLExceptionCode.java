@@ -208,6 +208,8 @@ public enum SQLExceptionCode {
             "Functions returning JSON fragments are not allowed in Index Expression."),
     AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION(542, "42918",
             "Aggregate expression not allowed in an TTL Expression."),
+    CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES(543, "42919",
+            "Cannot set condition TTL on table with multiple column families"),
     /**
      * HBase and Phoenix specific implementation defined sub-classes.
      * Column family related exceptions.

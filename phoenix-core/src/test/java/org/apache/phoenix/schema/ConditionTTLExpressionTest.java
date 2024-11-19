@@ -17,6 +17,8 @@
  */
 package org.apache.phoenix.schema;
 
+import static org.apache.phoenix.exception.SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION;
+import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES;
 import static org.apache.phoenix.schema.PTableType.INDEX;
 import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
 import static org.apache.phoenix.util.TestUtil.retainSingleQuotes;
@@ -122,8 +124,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
 
     @Test
     public void testBasicExpression() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, col1 varchar, col2 date " +
-                "constraint pk primary key (k1,k2 desc))";
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc))";
         String ddlTemplateWithTTL = ddlTemplate + " TTL = '%s'";
         String tableNoTTL = generateUniqueName();
         String tableWithTTL = generateUniqueName();
@@ -141,8 +143,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
 
     @Test(expected = TypeMismatchException.class)
     public void testNotBooleanExpr() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, col1 varchar, col2 date " +
-                "constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
         String ttl = "k1 + 100";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
@@ -153,8 +155,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
 
     @Test(expected = TypeMismatchException.class)
     public void testWrongArgumentValue() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, col1 varchar, col2 date " +
-                "constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
         String ttl = "k1 = ''abc''";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
@@ -165,13 +167,58 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
 
     @Test(expected = PhoenixParserException.class)
     public void testParsingError() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, col1 varchar, col2 date " +
-                "constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
         String ttl = "k2 == 23";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
         try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
             conn.createStatement().execute(ddl);
+        }
+    }
+
+    @Test
+    public void testMultipleColumnFamilyNotAllowed() throws SQLException {
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "A.col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ttl = "A.col1 = 'expired'";
+        String tableName = generateUniqueName();
+        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(ddl);
+            fail();
+        } catch (SQLException e) {
+            assertEquals(CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
+                e.getErrorCode());
+        } catch (Exception e) {
+            fail("Unknown exception " + e);
+        }
+    }
+
+    @Test
+    public void testSingleNonDefaultColumnFamilyIsAllowed() throws SQLException {
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "A.col1 varchar, A.col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ttl = "A.col1 = 'expired' AND A.col2 + 10 > CURRENT_DATE()";
+        String tableName = generateUniqueName();
+        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(ddl);
+            assertConditonTTL(conn, tableName, ttl);
+        }
+    }
+
+    @Test
+    public void testDefaultColumnFamily() throws SQLException {
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'," +
+                "DEFAULT_COLUMN_FAMILY='cf'";
+        String ttl = "col1 = 'expired' AND col2 + 10 > CURRENT_DATE()";
+        String tableName = generateUniqueName();
+        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(ddl);
+            assertConditonTTL(conn, tableName, ttl);
         }
     }
 
@@ -182,11 +229,11 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         String ttl = "SUM(k2) > 23";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
             fail();
         } catch (SQLException e) {
-            assertEquals(SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION.getErrorCode(),
+            assertEquals(AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION.getErrorCode(),
                     e.getErrorCode());
         } catch (Exception e) {
             fail("Unknown exception " + e);

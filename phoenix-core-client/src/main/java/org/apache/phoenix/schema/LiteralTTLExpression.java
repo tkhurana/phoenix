@@ -20,6 +20,7 @@ package org.apache.phoenix.schema;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import org.apache.hadoop.hbase.Cell;
@@ -66,7 +67,7 @@ public class LiteralTTLExpression extends TTLExpression {
 
     @Override
     public void validateTTLOnCreation(PhoenixConnection conn,
-                                      CreateTableStatement create) throws SQLException {
+                                      CreateTableStatement create, Map<String, Object> tableProps) throws SQLException {
 
     }
 

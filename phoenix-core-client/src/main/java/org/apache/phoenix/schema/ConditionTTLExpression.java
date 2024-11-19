@@ -20,6 +20,7 @@ package org.apache.phoenix.schema;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.DEFAULT_TTL;
 import static org.apache.phoenix.schema.PTable.ImmutableStorageScheme.ONE_CELL_PER_COLUMN;
 import static org.apache.phoenix.schema.PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS;
+import static org.apache.phoenix.util.SchemaUtil.isPKColumn;
 
 import java.io.IOException;
 import java.sql.SQLException;
@@ -28,6 +29,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
@@ -38,6 +40,7 @@ import org.apache.phoenix.compile.ExpressionCompiler;
 import org.apache.phoenix.compile.FromCompiler;
 import org.apache.phoenix.compile.IndexStatementRewriter;
 import org.apache.phoenix.compile.StatementContext;
+import org.apache.phoenix.compile.WhereCompiler.WhereExpressionCompiler;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.SQLExceptionInfo;
 import org.apache.phoenix.expression.Expression;
@@ -51,12 +54,15 @@ import org.apache.phoenix.parse.CreateTableStatement;
 import org.apache.phoenix.parse.ParseNode;
 import org.apache.phoenix.parse.SQLParser;
 import org.apache.phoenix.parse.TableName;
+import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.schema.tuple.MultiKeyValueTuple;
 import org.apache.phoenix.schema.types.PBoolean;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.util.SchemaUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.google.common.collect.Sets;
 
 public class ConditionTTLExpression extends TTLExpression {
     private static final Logger LOGGER = LoggerFactory.getLogger(ConditionTTLExpression.class);
@@ -157,7 +163,10 @@ public class ConditionTTLExpression extends TTLExpression {
     }
 
     @Override
-    public void validateTTLOnCreation(PhoenixConnection conn, CreateTableStatement create) throws SQLException {
+    public void validateTTLOnCreation(PhoenixConnection conn,
+                                      CreateTableStatement create,
+                                      Map<String, Object> tableProps) throws SQLException {
+        validateFamilyCount(create, tableProps);
         ParseNode ttlCondition = SQLParser.parseCondition(this.ttlExpr);
         StatementContext ttlValidationContext = new StatementContext(new PhoenixStatement(conn));
         // Construct a PTable with just enough information to be able to compile the TTL expression
@@ -171,6 +180,11 @@ public class ConditionTTLExpression extends TTLExpression {
 
     @Override
     public void validateTTLOnAlter(PhoenixConnection conn, PTable table) throws SQLException {
+        if (table.getColumnFamilies().size() > 1) {
+            throw new SQLExceptionInfo.Builder(
+                    SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES)
+                    .build().buildException();
+        }
         ParseNode ttlCondition = SQLParser.parseCondition(this.ttlExpr);
         ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
         StatementContext context = new StatementContext(new PhoenixStatement(conn), resolver);
@@ -204,6 +218,15 @@ public class ConditionTTLExpression extends TTLExpression {
         }
         // TODO: Fix exception
         throw new SQLException("Parent not found");
+    }
+
+    private Expression getCompiledExpression(PhoenixConnection connection,
+                                             PTable table,
+                                             ParseNode ttlCondition) throws SQLException {
+        ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
+        StatementContext context = new StatementContext(new PhoenixStatement(connection), resolver);
+        WhereExpressionCompiler expressionCompiler = new WhereExpressionCompiler(context);
+        return ttlCondition.accept(expressionCompiler);
     }
 
     @Override
@@ -312,12 +335,38 @@ public class ConditionTTLExpression extends TTLExpression {
 
         if (expressionCompiler.isAggregate()) {
             throw new SQLExceptionInfo.Builder(
-                    SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION).build().buildException();
+                    SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION)
+                    .build().buildException();
         }
 
         if (ttlExpression.getDataType() != PBoolean.INSTANCE) {
             throw TypeMismatchException.newException(PBoolean.INSTANCE,
                     ttlExpression.getDataType(), ttlExpression.toString());
+        }
+    }
+
+    private void validateFamilyCount(CreateTableStatement create,
+                                     Map<String, Object> tableProps) throws SQLException {
+        String defaultFamilyName = (String)
+                TableProperty.DEFAULT_COLUMN_FAMILY.getValue(tableProps);
+        defaultFamilyName = (defaultFamilyName == null) ? QueryConstants.DEFAULT_COLUMN_FAMILY
+                : defaultFamilyName;
+        Set<String> families = Sets.newHashSet();
+        for (ColumnDef columnDef : create.getColumnDefs()) {
+            if (isPKColumn(create.getPrimaryKeyConstraint(), columnDef)) {
+                continue; // Ignore PK columns since they always have null column family
+            }
+            String familyName = columnDef.getColumnDefName().getFamilyName();
+            if (familyName != null) {
+                families.add(familyName);
+            } else {
+                families.add(defaultFamilyName);
+            }
+        }
+        if (families.size() > 1) {
+            throw new SQLExceptionInfo.Builder(
+                    SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES)
+                    .build().buildException();
         }
     }
 }

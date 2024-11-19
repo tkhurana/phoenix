@@ -254,7 +254,7 @@ public enum TableProperty {
          * special values :-
          * NONE or 0L => Not Defined.
          * FOREVER => HConstants.LATEST_TIMESTAMP
-         *
+         * Value can also be a boolean condition
          * @param value
          * @return
          */

@@ -20,6 +20,7 @@ package org.apache.phoenix.schema;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
@@ -67,7 +68,8 @@ public abstract class TTLExpression {
     abstract public String toString();
 
     abstract public void validateTTLOnCreation(PhoenixConnection conn,
-                                               CreateTableStatement create) throws SQLException;
+                                               CreateTableStatement create,
+                                               Map<String, Object> tableProps) throws SQLException;
 
     abstract public void validateTTLOnAlter(PhoenixConnection connection, PTable table) throws SQLException;
 

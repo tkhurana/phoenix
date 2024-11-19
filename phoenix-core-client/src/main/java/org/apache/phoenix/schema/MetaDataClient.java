@@ -2467,7 +2467,7 @@ public class MetaDataClient {
                             .buildException();
                 }
                 try {
-                    ttlProp.validateTTLOnCreation(connection, statement);
+                    ttlProp.validateTTLOnCreation(connection, statement, tableProps);
                 } catch (IllegalArgumentException e) {
                     throw new SQLExceptionInfo.Builder(SQLExceptionCode.ILLEGAL_DATA)
                             .setMessage(e.getMessage())
@@ -3087,7 +3087,7 @@ public class MetaDataClient {
                 } else {
                     // do not allow setting NOT-NULL constraint on non-primary columns.
                     if (  !colDef.isNull() && !isImmutableRows &&
-                        ( wasPKDefined || !isPkColumn(pkConstraint, colDef))) {
+                        ( wasPKDefined || !SchemaUtil.isPKColumn(pkConstraint, colDef))) {
                             throw new SQLExceptionInfo.Builder(SQLExceptionCode.KEY_VALUE_NOT_NULL)
                                 .setSchemaName(schemaName)
                                 .setTableName(tableName)
@@ -3096,7 +3096,7 @@ public class MetaDataClient {
                 }
                 ColumnName columnDefName = colDef.getColumnDefName();
                 String colDefFamily = columnDefName.getFamilyName();
-                boolean isPkColumn = isPkColumn(pkConstraint, colDef);
+                boolean isPkColumn = SchemaUtil.isPKColumn(pkConstraint, colDef);
                 String cqCounterFamily = null;
                 if (!isPkColumn) {
                     if (immutableStorageScheme == SINGLE_CELL_ARRAY_WITH_OFFSETS && encodingScheme != NON_ENCODED_QUALIFIERS) {
@@ -3875,10 +3875,6 @@ public class MetaDataClient {
                 .setSchemaName(schemaName).setTableName(tableName).build().buildException();
     }
 
-    private static boolean isPkColumn(PrimaryKeyConstraint pkConstraint, ColumnDef colDef) {
-        return colDef.isPK() || (pkConstraint != null && pkConstraint.contains(colDef.getColumnDefName()));
-    }
-    
     /**
      * A table can be a parent table to tenant-specific tables if all of the following conditions are true:
      * <p>

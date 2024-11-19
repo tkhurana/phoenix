@@ -160,23 +160,19 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
      */
     @Test
     public void  testCreateTableWithTTLWithDifferentColumnFamilies() throws  Exception {
+        if (useExpression) {
+            return; // multiple column families not supported for Condition TTL
+        }
         String tableName = generateUniqueName();
-        String ttlExpr = "id = 'x' AND b.col2 = 7";
-        int ttlValue = 86400;
-        String ttl = (useExpression ?
-                String.format("'%s'", retainSingleQuotes(ttlExpr)) :
-                String.valueOf(ttlValue));
         String ddl =
                 "create table IF NOT EXISTS  " + tableName + "  (" + " id char(1) NOT NULL,"
                         + " col1 integer NOT NULL," + " b.col2 bigint," + " col3 bigint, "
                         + " CONSTRAINT NAME_PK PRIMARY KEY (id, col1)"
-                        + " ) TTL=" + ttl;
-        try (Connection conn = DriverManager.getConnection(getUrl())) {
-            conn.createStatement().execute(ddl);
-            TTLExpression expected = useExpression ?
-                    TTLExpression.create(ttlExpr) : TTLExpression.create(ttlValue);
-            assertTTLValue(conn.unwrap(PhoenixConnection.class), expected, tableName);
-        }
+                        + " ) TTL=" + DEFAULT_TTL_FOR_TEST;
+        Connection conn = DriverManager.getConnection(getUrl());
+        conn.createStatement().execute(ddl);
+        TTLExpression expected = TTLExpression.create(DEFAULT_TTL_FOR_TEST);
+        assertTTLValue(conn.unwrap(PhoenixConnection.class), expected, tableName);
         //Setting TTL should not be stored as CF Descriptor properties when
         //phoenix.table.ttl.enabled is true
         Admin admin = driver.getConnectionQueryServices(getUrl(), new Properties()).getAdmin();
@@ -318,20 +314,20 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
     }
 
     @Test
-    public void testConditionalTTLDDL() throws Exception {
+    public void testConditionTTLDDL() throws Exception {
         if (!useExpression) {
             return;
         }
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             String tableName = generateUniqueName();
-            String ddl = "CREATE TABLE %s (ID1 VARCHAR NOT NULL, ID2 INTEGER NOT NULL, COL1 VARCHAR, G.COL2 DATE " +
+            String ddl = "CREATE TABLE %s (ID1 VARCHAR NOT NULL, ID2 INTEGER NOT NULL, COL1 VARCHAR, COL2 DATE " +
                     "CONSTRAINT PK PRIMARY KEY(ID1, ID2)) TTL = '%s'";
             try {
                 conn.createStatement().execute(String.format(ddl, tableName, "ID2 = 12 OR UNKNOWN_COLUMN = 67"));
                 fail("Should have thrown ColumnNotFoundException");
             } catch (ColumnNotFoundException e) {
             }
-            String ttl = "ID2 = 34 AND G.COL2 > CURRENT_DATE() + 1000";
+            String ttl = "ID2 = 34 AND COL2 > CURRENT_DATE() + 1000";
             conn.createStatement().execute(String.format(ddl, tableName, ttl));
             TTLExpression expected = TTLExpression.create(ttl);
             assertTTLValue(conn.unwrap(PhoenixConnection.class), expected, tableName);
@@ -356,12 +352,12 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
             } catch (ColumnFamilyNotFoundException e) {
 
             }
-            ttl = "G.COL2 > CURRENT_DATE() + 200 AND VINT > 123";
+            ttl = "COL2 > CURRENT_DATE() + 200 AND VINT > 123";
             conn.createStatement().execute(String.format(ddl, viewName, tableName, ttl));
             expected = TTLExpression.create(ttl);
             assertTTLValue(conn.unwrap(PhoenixConnection.class), expected, viewName);
 
-            ttl = "G.COL2 > CURRENT_DATE() + 500 AND VINT > 123";
+            ttl = "COL2 > CURRENT_DATE() + 500 AND VINT > 123";
             conn.createStatement().execute(String.format("ALTER VIEW %s SET TTL='%s'",
                     viewName, ttl));
             expected = TTLExpression.create(ttl);
