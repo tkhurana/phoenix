@@ -21,7 +21,6 @@ import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEF
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_MISSING_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_VALID_INDEX_ROW_COUNT;
-import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REPAIR_EXTRA_VERIFIED_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.SCANNED_DATA_ROW_COUNT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -45,7 +44,6 @@ import java.util.Random;
 
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.mapreduce.Counter;
 import org.apache.hadoop.mapreduce.CounterGroup;
 import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
 import org.apache.phoenix.end2end.IndexToolIT;
@@ -62,8 +60,6 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 import org.apache.phoenix.util.CDCUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
-import org.apache.phoenix.util.IndexUtil;
-import org.apache.phoenix.util.IndexUtilTest;
 import org.apache.phoenix.util.ManualEnvironmentEdge;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
@@ -394,6 +390,53 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
     }
 
     @Test
+    public void testPartialRowRetainedInMaxLookBack() throws Exception {
+        if (tableLevelMaxLookback == 0) {
+            return;
+        }
+        String ttlCol = columns.get("VAL5");
+        // ttl = '<FAMILY>.VAL4 = TRUE'
+        String ttlExpression = String.format("%s=TRUE OR %s is null", ttlCol, ttlCol);
+        createTable(ttlExpression);
+        String tableName = schemaBuilder.getEntityTableName();
+        injectEdge();
+        int rowCount = 1;
+        long actual;
+        long startTime = injectEdge.currentTime();
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            populateTable(conn, rowCount);
+            // expire 1 row by setting to true
+            injectEdge.incrementValue(1);
+            updateColumn(conn, 0, ttlCol, true);
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount - 1, actual);
+            // all previous updates of the expired row fall out of maxlookback + ttl window
+            injectEdge.incrementValue(2*tableLevelMaxLookback+5);
+            // update another column not part of ttl expression
+            updateColumn(conn, 0, columns.get("VAL2"), 2345);
+            // only the last update should be visible through the maxlookback window
+            injectEdge.incrementValue(1);
+            doMajorCompaction(tableName);
+            injectEdge.incrementValue(tableLevelMaxLookback + 5);
+            doMajorCompaction(tableName);
+            /*CellCount expectedCellCount = new CellCount();
+            for (int i = 0; i < rowCount; ++i) {
+                // additional cell for empty column
+                expectedCellCount.addRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
+            }
+            // 1 row is expired
+            expectedCellCount.removeRow(dataRowPosToKey.get(2));
+            // Add 1 empty column cell to cover the gap
+            expectedCellCount.addCell(dataRowPosToKey.get(3));
+            validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            // 1 row purged and 1 row masked
+            assertEquals(rowCount - 2, actual);
+             */
+        }
+    }
+
+    @Test
     public void testPhoenixRowTimestamp() throws Exception {
         int ttl = 50;
         String ttlExpression = String.format("TO_NUMBER(CURRENT_TIME()) - TO_NUMBER(PHOENIX_ROW_TIMESTAMP())" +
@@ -568,28 +611,22 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         String ttlCol = columns.get("VAL5");
         // ttl = '<FAMILY>.VAL4 = TRUE'
         String ttlExpression = String.format("%s=TRUE", ttlCol);
-        createTable("3600");
+        createTable(ttlExpression);
         String fullDataTableName = schemaBuilder.getEntityTableName();
         String schemaName = SchemaUtil.getSchemaNameFromFullName(fullDataTableName);
         String tableName = SchemaUtil.getTableNameFromFullName(fullDataTableName);
         injectEdge();
-        int rowCount = 6;
+        int rowCount = 5;
         long actual;
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             populateTable(conn, rowCount);
             injectEdge.incrementValue(10);
-            // expire some rows
-            for (int i = 0; i < rowCount; i+=2) {
-                updateColumn(conn, i, ttlCol, true);
-            }
-            injectEdge.incrementValue(10);
-            //updateColumn(conn, 2, ttlCol, false);
             deleteRow(conn, 2);
             injectEdge.incrementValue(10);
-            updateColumn(conn, 2, columns.get("VAL2"), 23);
+            // expire some rows
+            updateColumn(conn, 0, ttlCol, true);
+            updateColumn(conn, 4, ttlCol, true);
             injectEdge.incrementValue(10);
-            conn.createStatement().execute(String.format(
-                    "ALTER TABLE %s SET TTL='%s'", fullDataTableName, ttlExpression));
             // now create the index async
             String indexName = generateUniqueName();
             String fullIndexName = SchemaUtil.getTableName(schemaName, indexName);
@@ -597,34 +634,28 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                     indexName, fullDataTableName, columns.get("VAL1"), ttlCol);
             conn.createStatement().execute(indexDDL);
             IndexToolIT.runIndexTool(false, schemaName, tableName, indexName);
-            TestUtil.dumpTable(conn, TableName.valueOf(fullDataTableName));
-            TestUtil.dumpTable(conn, TableName.valueOf(fullIndexName));
+            populateRowPosToRowKey(conn, false);
 
             // Both the tables should have the same row count from Phoenix
-            /*actual = TestUtil.getRowCount(conn, fullDataTableName, true);
-            assertEquals(rowCount/2, actual);
+            actual = TestUtil.getRowCount(conn, fullDataTableName, true);
+            assertEquals(rowCount -(2+1), actual); // 2 expired, 1 deleted
             actual = TestUtil.getRowCountFromIndex(conn, fullDataTableName, fullIndexName);
-            assertEquals(rowCount/2, actual);
-             */
+            assertEquals(rowCount -(2+1), actual);
 
-            // The data table raw row count should include masked rows
-            //actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullDataTableName));
-            //assertEquals(rowCount, actual);
-
-            // Since the index table was built after the rows were expired the raw row count
-            // will exclude the masked rows
-            //actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullIndexName));
-            //assertEquals(rowCount/2 + 1, actual);
+            // raw row count should include masked rows
+            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullDataTableName));
+            assertEquals(rowCount, actual);
+            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullIndexName));
+            assertEquals(rowCount, actual);
 
             // run index verification
             IndexTool it = IndexToolIT.runIndexTool(false, schemaName, tableName, indexName,
-                    null, 0, IndexTool.IndexVerifyType.BEFORE);
+                    null, 0, IndexTool.IndexVerifyType.ONLY);
             CounterGroup mrJobCounters = IndexToolIT.getMRJobCounters(it);
-            IndexToolIT.dumpMRJobCounters(mrJobCounters);
-            /*try {
-                assertEquals(rowCount / 2 + 1,
+            try {
+                assertEquals(rowCount,
                         mrJobCounters.findCounter(SCANNED_DATA_ROW_COUNT.name()).getValue());
-                assertEquals(rowCount / 2 + 1,
+                assertEquals(rowCount,
                         mrJobCounters.findCounter(BEFORE_REBUILD_VALID_INDEX_ROW_COUNT.name()).getValue());
                 assertEquals(0,
                         mrJobCounters.findCounter(BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT.name()).getValue());
@@ -635,7 +666,34 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             } catch (AssertionError e) {
                 IndexToolIT.dumpMRJobCounters(mrJobCounters);
                 throw e;
-            }*/
+            }
+            injectEdge.incrementValue(2*tableLevelMaxLookback + 5);
+            doMajorCompaction(fullDataTableName);
+            doMajorCompaction(fullIndexName);
+
+            CellCount expectedCellCount = new CellCount();
+            for (int i = 0; i < rowCount; ++i) {
+                // additional cell for empty column
+                expectedCellCount.addRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
+            }
+            // remove the expired rows
+            expectedCellCount.removeRow(dataRowPosToKey.get(0));
+            expectedCellCount.removeRow(dataRowPosToKey.get(4));
+            // remove the deleted row
+            expectedCellCount.removeRow(dataRowPosToKey.get(2));
+            validateTable(conn, fullDataTableName, expectedCellCount, dataRowPosToKey);
+
+            expectedCellCount = new CellCount();
+            for (int i = 0; i < rowCount; ++i) {
+                // 1 cell for empty column and 1 for included column
+                expectedCellCount.addRow(indexRowPosToKey.get(i), 2);
+            }
+            // remove the expired rows
+            expectedCellCount.removeRow(indexRowPosToKey.get(0));
+            expectedCellCount.removeRow(indexRowPosToKey.get(4));
+            // remove the deleted row
+            expectedCellCount.removeRow(indexRowPosToKey.get(2));
+            validateTable(conn, fullIndexName, expectedCellCount, indexRowPosToKey);
         }
     }
 
@@ -881,7 +939,9 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         }
         // used for verification purposes
         populateRowPosToRowKey(conn, true);
-        populateRowPosToRowKey(conn, false);
+        if (schemaBuilder.isTableIndexCreated()) {
+            populateRowPosToRowKey(conn, false);
+        }
     }
 
     /**

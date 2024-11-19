@@ -55,8 +55,12 @@ import org.apache.phoenix.schema.tuple.MultiKeyValueTuple;
 import org.apache.phoenix.schema.types.PBoolean;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.util.SchemaUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ConditionTTLExpression extends TTLExpression {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ConditionTTLExpression.class);
+
     private final String ttlExpr;
     private Expression conditionExpr;
 
@@ -146,6 +150,8 @@ public class ConditionTTLExpression extends TTLExpression {
         if (conditionExpr.evaluate(row, ptr)) {
             Boolean isExpired = (Boolean) PBoolean.INSTANCE.toObject(ptr);
             ttl = isExpired ? 0 : DEFAULT_TTL;
+        } else {
+            LOGGER.info("Expression evaluation failed for expr {}", ttlExpr);
         }
         return ttl;
     }
