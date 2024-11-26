@@ -788,32 +788,6 @@ public class QueryCompiler {
         TableRef tableRef = context.getCurrentTable();
         PTable table = tableRef.getTable();
 
-        if (table.hasConditionTTL()) { // TODO CDC index
-            ConditionTTLExpression condTTLExpr = (ConditionTTLExpression) table.getTTL();
-            // For non-index tables we have to re-write the WHERE clause by ANDing the condition
-            // TTL expression. We can do it since the condition TTL expression always evaluates to
-            // a BOOLEAN. For index tables we don't need to re-write since we first re-write
-            // the query for data table and later the optimizer will re-write for index tables.
-            // The only time we need to re-write the WHERE clause for index tables is when the
-            // query is run directly against the index tables in which case the dataPlans
-            // will be empty
-            boolean rewrite = table.getType() != PTableType.INDEX || dataPlans.isEmpty();
-            if (rewrite) {
-                PhoenixConnection conn = this.statement.getConnection();
-                // Takes care of translating data table column references
-                // to index table column references
-                ParseNode ttlCondition = condTTLExpr.parseExpression(conn, table);
-                ParseNode negateTTL = NODE_FACTORY.not(ttlCondition);
-                ParseNode where = select.getWhere();
-                if (where == null) {
-                    where = negateTTL;
-                } else {
-                    where = NODE_FACTORY.and(Arrays.asList(where, negateTTL));
-                }
-                select = NODE_FACTORY.select(select, where);
-            }
-        }
-
         if (table.getType() == PTableType.CDC) {
             List<AliasedNode> selectNodes = select.getSelect();
             // For CDC queries, if a single wildcard projection is used, automatically insert

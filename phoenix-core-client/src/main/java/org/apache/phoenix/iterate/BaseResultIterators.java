@@ -202,6 +202,10 @@ public abstract class BaseResultIterators extends ExplainTable implements Result
                         DEFAULT_WILDCARD_QUERY_DYNAMIC_COLS_ATTRIB);
         PTable table = tableRef.getTable();
 
+        if (table.hasConditionTTL()) {
+            ScanUtil.addConditionTTLColumnsToScan(scan, context.getConnection(), table);
+        }
+
         Map<byte [], NavigableSet<byte []>> familyMap = scan.getFamilyMap();
         // Hack for PHOENIX-2067 to force raw scan over all KeyValues to fix their row keys
         if (context.getConnection().isDescVarLengthRowKeyUpgrade()) {

@@ -42,6 +42,7 @@ import org.apache.phoenix.compile.QueryPlan;
 import org.apache.phoenix.exception.PhoenixParserException;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.execute.HashJoinPlan;
+import org.apache.phoenix.iterate.ResultIterator;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.jdbc.PhoenixStatement;
@@ -118,6 +119,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         if (useIndex) {
             assertTrue(plan.getTableRef().getTable().getType() == INDEX);
         }
+        ResultIterator iterator = plan.iterator();
         Scan scanWithCondTTL = plan.getContext().getScan();
         assertScanConditionTTL(scanNoTTL, scanWithCondTTL);
     }
@@ -136,7 +138,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
             ddl = String.format(ddlTemplateWithTTL, tableWithTTL, retainSingleQuotes(ttl));
             conn.createStatement().execute(ddl);
             assertConditonTTL(conn, tableWithTTL, ttl);
-            String queryTemplate = "SELECT k1, k2, col1, col2 from %s where k1 > 3";
+            String queryTemplate = "SELECT count(*) from %s where k1 > 3";
             compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl);
         }
     }

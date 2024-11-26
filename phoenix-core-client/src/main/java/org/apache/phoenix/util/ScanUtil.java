@@ -40,6 +40,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
+import java.util.Set;
 import java.util.TreeMap;
 
 import org.apache.hadoop.conf.Configuration;
@@ -80,6 +81,7 @@ import org.apache.phoenix.filter.EncodedQualifiersColumnProjectionFilter;
 import org.apache.phoenix.filter.MultiEncodedCQKeyValueComparisonFilter;
 import org.apache.phoenix.filter.PagingFilter;
 import org.apache.phoenix.filter.SkipScanFilter;
+import org.apache.phoenix.hbase.index.covered.update.ColumnReference;
 import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.hbase.index.util.VersionUtil;
 import org.apache.phoenix.index.CDCTableInfo;
@@ -91,6 +93,7 @@ import org.apache.phoenix.query.KeyRange.Bound;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
+import org.apache.phoenix.schema.ConditionTTLExpression;
 import org.apache.phoenix.schema.IllegalDataException;
 import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PName;
@@ -1464,6 +1467,35 @@ public class ScanUtil {
                         HConstants.EMPTY_BYTE_ARRAY,
                         scan.getStartRow(), scan.getStopRow());
             }
+        }
+    }
+
+    public static void addConditionTTLColumnsToScan(Scan scan,
+                                                    PhoenixConnection connection,
+                                                    PTable table) throws SQLException {
+        //If entity is a view and phoenix.view.ttl.enabled is false then don't
+        // set TTL scan attribute.
+        if ((table.getType() == PTableType.VIEW) &&
+                !connection.getQueryServices().getConfiguration().getBoolean(
+                        QueryServices.PHOENIX_VIEW_TTL_ENABLED,
+                        QueryServicesOptions.DEFAULT_PHOENIX_VIEW_TTL_ENABLED)) {
+            return;
+        }
+
+        // If Phoenix level TTL is not enabled OR is a system table then return.
+        if (!isPhoenixTableTTLEnabled(connection.getQueryServices().getConfiguration())) {
+            return;
+        }
+
+        if (!table.hasConditionTTL()) {
+            return;
+        }
+
+        ConditionTTLExpression ttlExpr = (ConditionTTLExpression) table.getTTL();
+        Set<ColumnReference> colsReferenced = ttlExpr.getColumnsReferenced(connection, table);
+        for (ColumnReference colref : colsReferenced) {
+            // TODO Single Cell
+            scan.addColumn(colref.getFamily(), colref.getQualifier());
         }
     }
 

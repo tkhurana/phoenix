@@ -197,6 +197,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             // expire 1 row by setting to true
             injectEdge.incrementValue(10);
             updateColumn(conn, 3, ttlCol, true);
+            injectEdge.incrementValue(1);
             actual = TestUtil.getRowCount(conn, tableName, true);
             Assert.assertEquals(rowCount - 1, actual);
             actual = TestUtil.getRowCountFromIndex(conn, tableName, indexName);
@@ -209,6 +210,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             // expire 1 more row
             injectEdge.incrementValue(10);
             updateColumn(conn, 2, ttlCol, true);
+            injectEdge.incrementValue(1);
             actual = TestUtil.getRowCount(conn, tableName, true);
             Assert.assertEquals(rowCount - 2, actual);
             actual = TestUtil.getRowCountFromIndex(conn, tableName, indexName);
@@ -217,6 +219,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             // refresh the row again
             injectEdge.incrementValue(10);
             updateColumn(conn, 3, ttlCol, false);
+            injectEdge.incrementValue(1);
             rs = readRow(conn, 3);
             assertTrue(rs.next());
             assertFalse(rs.getBoolean(ttlCol));
