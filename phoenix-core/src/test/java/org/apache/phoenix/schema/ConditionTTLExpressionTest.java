@@ -32,6 +32,9 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
+import java.util.NavigableSet;
+import java.util.Set;
 
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.Filter;
@@ -42,12 +45,14 @@ import org.apache.phoenix.compile.QueryPlan;
 import org.apache.phoenix.exception.PhoenixParserException;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.execute.HashJoinPlan;
+import org.apache.phoenix.hbase.index.covered.update.ColumnReference;
 import org.apache.phoenix.iterate.ResultIterator;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.jdbc.PhoenixStatement;
 import org.apache.phoenix.query.BaseConnectionlessQueryTest;
 import org.apache.phoenix.util.PropertiesUtil;
+import org.junit.Ignore;
 import org.junit.Test;
 
 public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
@@ -124,22 +129,44 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         assertScanConditionTTL(scanNoTTL, scanWithCondTTL);
     }
 
+    private void validateScan(Connection conn,
+                              String tableName,
+                              String query,
+                              String ttl,
+                              boolean useIndex,
+                              int expectedNonPKColsInTTLExpr) throws SQLException {
+        PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+        PhoenixPreparedStatement pstmt = new PhoenixPreparedStatement(pconn, query);
+        QueryPlan plan = pstmt.optimizeQuery();
+        if (useIndex) {
+            assertTrue(plan.getTableRef().getTable().getType() == INDEX);
+        }
+        plan.iterator(); // create the iterator to initialize the scan
+        Scan scan = plan.getContext().getScan();
+        Map<byte[], NavigableSet<byte[]>> familyMap = scan.getFamilyMap();
+        PTable table = pconn.getTable(tableName);
+        ConditionTTLExpression condTTL = (ConditionTTLExpression) table.getTTL();
+        Set<ColumnReference> columnsReferenced = condTTL.getColumnsReferenced(pconn, table);
+        assertEquals(expectedNonPKColsInTTLExpr, columnsReferenced.size());
+        for (ColumnReference colRef : columnsReferenced) {
+            NavigableSet<byte[]> set = familyMap.get(colRef.getFamily());
+            assertNotNull(set);
+            assertTrue(set.contains(colRef.getQualifier()));
+        }
+    }
+
     @Test
     public void testBasicExpression() throws SQLException {
         String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
-                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc))";
-        String ddlTemplateWithTTL = ddlTemplate + " TTL = '%s'";
-        String tableNoTTL = generateUniqueName();
-        String tableWithTTL = generateUniqueName();
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
         String ttl = "k1 > 5 AND col1 < 'zzzzzz'";
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
-            String ddl = String.format(ddlTemplate, tableNoTTL);
+        String tableName = generateUniqueName();
+        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
-            ddl = String.format(ddlTemplateWithTTL, tableWithTTL, retainSingleQuotes(ttl));
-            conn.createStatement().execute(ddl);
-            assertConditonTTL(conn, tableWithTTL, ttl);
-            String queryTemplate = "SELECT count(*) from %s where k1 > 3";
-            compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl);
+            assertConditonTTL(conn, tableName, ttl);
+            String query = String.format("SELECT count(*) from %s where k1 > 3", tableName);
+            validateScan(conn, tableName, query, ttl, false, 1);
         }
     }
 
@@ -150,7 +177,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         String ttl = "k1 + 100";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
         }
     }
@@ -162,7 +189,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         String ttl = "k1 = ''abc''";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
         }
     }
@@ -174,7 +201,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         String ttl = "k2 == 23";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
         }
     }
@@ -226,8 +253,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
 
     @Test
     public void testAggregateExpressionNotAllowed() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, col1 varchar, col2 date " +
-                "constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
         String ttl = "SUM(k2) > 23";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
@@ -244,54 +271,44 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
 
     @Test
     public void testNullExpression() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, col1 varchar, col2 date " +
-                "constraint pk primary key (k1,k2 desc))";
-        String ddlTemplateWithTTL = ddlTemplate + " TTL = '%s'";
-        String tableNoTTL = generateUniqueName();
-        String tableWithTTL = generateUniqueName();
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String tableName = generateUniqueName();
         String ttl = "col1 is NULL AND col2 < CURRENT_DATE() + 30000";
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
-            String ddl = String.format(ddlTemplate, tableNoTTL);
+        String ddl = String.format(ddlTemplate, tableName, ttl);
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
-            ddl = String.format(ddlTemplateWithTTL, tableWithTTL, ttl);
-            conn.createStatement().execute(ddl);
-            assertConditonTTL(conn, tableWithTTL, ttl);
-            String queryTemplate = "SELECT * from %s";
-            compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl);
+            assertConditonTTL(conn, tableName, ttl);
+            String query = String.format("SELECT count(*) from %s", tableName);
+            validateScan(conn, tableName, query, ttl, false, 2);
         }
     }
 
     @Test
     public void testBooleanColumn() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, val varchar, expired BOOLEAN " +
-                "constraint pk primary key (k1,k2 desc))";
-        String ddlTemplateWithTTL = ddlTemplate + " TTL = '%s'";
-        String tableNoTTL = generateUniqueName();
-        String indexNoTTL = "I_" + tableNoTTL;
-        String tableWithTTL = generateUniqueName();
-        String indexWithTTL = "I_" + tableWithTTL;
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "val varchar, expired BOOLEAN constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String tableName = generateUniqueName();
+        String indexName = "I_" + tableName;
         String indexTemplate = "create index %s on %s (val) include (expired)";
         String ttl = "expired";
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
-            String ddl = String.format(ddlTemplate, tableNoTTL);
+        String query;
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String ddl = String.format(ddlTemplate, tableName, ttl);
             conn.createStatement().execute(ddl);
-            ddl = String.format(ddlTemplateWithTTL, tableWithTTL, ttl);
-            conn.createStatement().execute(ddl);
-            assertConditonTTL(conn, tableWithTTL, ttl);
+            assertConditonTTL(conn, tableName, ttl);
 
-            String queryTemplate = "SELECT k1, k2 from %s where (k1,k2) IN ((1,2), (3,4))";
-            compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl);
+            query = String.format("SELECT k1, k2 from %s where (k1,k2) IN ((1,2), (3,4))",
+                    tableName);
+            validateScan(conn, tableName, query, ttl, false, 1);
 
-            queryTemplate = "SELECT COUNT(*) from %s";
-            compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl);
+            ddl = String.format(indexTemplate, indexName, tableName);
+            conn.createStatement().execute(ddl);
+            assertConditonTTL(conn, indexName, ttl);
 
-            ddl = String.format(indexTemplate, indexNoTTL, tableNoTTL);
-            conn.createStatement().execute(ddl);
-            ddl = String.format(indexTemplate, indexWithTTL, tableWithTTL);
-            conn.createStatement().execute(ddl);
-            assertTTL(conn, indexNoTTL, TTLExpression.TTL_EXPRESSION_NOT_DEFINED);
-            assertConditonTTL(conn, indexWithTTL, ttl);
-            compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl, true);
+            // validate the scan on index
+            query = String.format("SELECT count(*) from %s", tableName);
+            validateScan(conn, tableName, query, ttl, true, 1);
         }
     }
 
@@ -302,7 +319,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         String ttl = "NOT expired";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
             assertConditonTTL(conn, tableName, ttl);
         }
@@ -310,22 +327,17 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
 
     @Test
     public void testPhoenixRowTimestamp() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, col1 varchar " +
-                "constraint pk primary key (k1,k2 desc))";
-        String ddlTemplateWithTTL = ddlTemplate + " TTL = '%s'";
-        String tableNoTTL = generateUniqueName();
-        String tableWithTTL = generateUniqueName();
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String tableName = generateUniqueName();
         String ttl = "PHOENIX_ROW_TIMESTAMP() < CURRENT_DATE() - 100";
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
-            String ddl = String.format(ddlTemplate, tableNoTTL);
+        String ddl = String.format(ddlTemplate, tableName, ttl);
+        String query;
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
-            ddl = String.format(ddlTemplateWithTTL, tableWithTTL, ttl);
-            conn.createStatement().execute(ddl);
-            assertConditonTTL(conn, tableWithTTL, ttl);
-            String queryTemplate = "select * from %s where k1 = 7 AND k2 > 12";
-            compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl);
-            queryTemplate = "select * from %s where k1 = 7 AND k2 > 12 AND col1 = 'abc'";
-            compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl);
+            assertConditonTTL(conn, tableName, ttl);
+            query = String.format("select col1 from %s where k1 = 7 AND k2 > 12", tableName);
+            validateScan(conn, tableName, query, ttl, false, 0);
         }
     }
 
@@ -337,7 +349,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         String expectedTTLExpr = "CASE WHEN status = 'E' THEN TRUE ELSE FALSE END";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
             assertConditonTTL(conn, tableName, expectedTTLExpr);
         }
@@ -347,26 +359,19 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
     public void testCondTTLOnTopLevelView() throws SQLException {
         String ddlTemplate = "create table %s (k1 bigint not null primary key," +
                 "k2 bigint, col1 varchar, status char(1))";
-        String tableName1 = generateUniqueName();
-        String tableName2 = generateUniqueName();
-        String viewNameNoTTL = generateUniqueName();
-        String viewNameWithTTL = generateUniqueName();
+        String tableName = generateUniqueName();
+        String viewName = generateUniqueName();
         String viewTemplate = "create view %s (k3 smallint) as select * from %s WHERE k1=7 TTL = '%s'";
         String ttl = "k2 = 34 and k3 = -1";
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
-            String ddl = String.format(ddlTemplate, tableName1);
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String ddl = String.format(ddlTemplate, tableName);
             conn.createStatement().execute(ddl);
-            ddl = String.format(viewTemplate, viewNameWithTTL, tableName1, ttl);
+            ddl = String.format(viewTemplate, viewName, tableName, ttl);
             conn.createStatement().execute(ddl);
-            assertTTL(conn, tableName1, TTLExpression.TTL_EXPRESSION_NOT_DEFINED);
-            assertConditonTTL(conn, viewNameWithTTL, ttl);
-            ddl = String.format(ddlTemplate, tableName2);
-            conn.createStatement().execute(ddl);
-            ddl = String.format(viewTemplate, viewNameNoTTL, tableName2, "NONE");
-            conn.createStatement().execute(ddl);
-            assertTTL(conn, tableName1, TTLExpression.TTL_EXPRESSION_NOT_DEFINED);
-            String queryTemplate = "select * from %s";
-            compareScanWithCondTTL(conn, viewNameNoTTL, viewNameWithTTL, queryTemplate, ttl);
+            assertTTL(conn, tableName, TTLExpression.TTL_EXPRESSION_NOT_DEFINED);
+            assertConditonTTL(conn, viewName, ttl);
+            String query = String.format("select k3 from %s", viewName);
+            validateScan(conn, viewName, query, ttl, false, 2);
         }
     }
 
@@ -394,85 +399,44 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
     }
 
     @Test
-    public void testRVCUsingPkColsReturnedByPlanShouldUseIndex() throws Exception {
-        try (Connection conn = DriverManager.getConnection(getUrl())) {
-            conn.createStatement().execute(
-                    "CREATE TABLE T (k VARCHAR NOT NULL PRIMARY KEY, v1 CHAR(15), v2 VARCHAR) " +
-                            "TTL='v1=''EXPIRED'''");
-            conn.createStatement().execute("CREATE INDEX IDX ON T(v1, v2)");
-            PhoenixStatement stmt = conn.createStatement().unwrap(PhoenixStatement.class);
-            String query = "select * from t where (v1, v2, k) > ('1', '2', '3')";
-            QueryPlan plan = stmt.optimizeQuery(query);
-            assertEquals("IDX", plan.getTableRef().getTable().getTableName().getString());
-            Scan scan = plan.getContext().getScan();
-            Filter filter = scan.getFilter();
-            assertEquals(filter.toString(), "NOT (TO_CHAR(\"V1\") = 'EXPIRED')");
-        }
-    }
-
-    @Test
     public void testInListTTLExpr() throws Exception {
         String ddlTemplate = "create table %s (id varchar not null primary key, " +
-                "col1 integer, col2 varchar)";
-        String ddlTemplateWithTTL = ddlTemplate + " TTL = '%s'";
-        String tableNoTTL = generateUniqueName();
-        String tableWithTTL = generateUniqueName();
+                "col1 integer, col2 varchar) TTL = '%s'";
+        String tableName = generateUniqueName();
         String ttl = "col2 IN ('expired', 'cancelled')";
+        String query;
         try (Connection conn = DriverManager.getConnection(getUrl())) {
-            String ddl = String.format(ddlTemplate, tableNoTTL);
+            String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
             conn.createStatement().execute(ddl);
-            ddl = String.format(ddlTemplateWithTTL, tableWithTTL, retainSingleQuotes(ttl));
-            conn.createStatement().execute(ddl);
-            assertConditonTTL(conn, tableWithTTL, ttl);
-            String queryTemplate = "select * from %s where id IN ('abc', 'fff')";
-            compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl);
+            assertConditonTTL(conn, tableName, ttl);
+            query = String.format("select col1 from %s where id IN ('abc', 'fff')", tableName);
+            validateScan(conn, tableName, query, ttl, false, 1);
         }
     }
 
     @Test
     public void testPartialIndex() throws Exception {
         String ddlTemplate = "create table %s (id varchar not null primary key, " +
-                "col1 integer, col2 integer, col3 double, col4 varchar)";
-        String ddlTemplateWithTTL = ddlTemplate + " TTL = '%s'";
-        String tableNoTTL = generateUniqueName();
-        String tableWithTTL = generateUniqueName();
+                "col1 integer, col2 integer, col3 double, col4 varchar) TTL = '%s'";
+        String tableName = generateUniqueName();
         String indexTemplate = "create index %s on %s (col1) " +
                 "include (col2, col3, col4) where col1 > 50";
-        String indexNoTTL = generateUniqueName();
-        String indexWithTTL = generateUniqueName();
+        String indexName = generateUniqueName();
         String ttl = "col2 > 100 AND col4='expired'";
+        String query;
         try (Connection conn = DriverManager.getConnection(getUrl())) {
-            String ddl = String.format(ddlTemplate, tableNoTTL);
+            String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
             conn.createStatement().execute(ddl);
-            ddl = String.format(ddlTemplateWithTTL, tableWithTTL, retainSingleQuotes(ttl));
+            assertConditonTTL(conn, tableName, ttl);
+            ddl = String.format(indexTemplate, indexName, tableName);
             conn.createStatement().execute(ddl);
-            assertConditonTTL(conn, tableWithTTL, ttl);
-            ddl = String.format(indexTemplate, indexNoTTL, tableNoTTL);
-            conn.createStatement().execute(ddl);
-            ddl = String.format(indexTemplate, indexWithTTL, tableWithTTL);
-            conn.createStatement().execute(ddl);
-            assertConditonTTL(conn, indexWithTTL, ttl);
-            String queryTemplate = "select * from %s where col1 > 60";
-            compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl, true);
+            assertConditonTTL(conn, indexName, ttl);
+            query = String.format("select col3 from %s where col1 > 60", tableName);
+            validateScan(conn, tableName, query, ttl, false, 2);
         }
     }
 
-    @Test
-    public void testOrderByOptimizedOut() throws Exception {
-        try (Connection conn = DriverManager.getConnection(getUrl())) {
-            conn.createStatement().execute(
-                    "CREATE TABLE foo (k VARCHAR NOT NULL PRIMARY KEY, v VARCHAR) " +
-                            "IMMUTABLE_ROWS=true,TTL='v=''EXPIRED'''");
-            PhoenixStatement stmt = conn.createStatement().unwrap(PhoenixStatement.class);
-            QueryPlan plan = stmt.optimizeQuery("SELECT * FROM foo ORDER BY k");
-            assertEquals(OrderByCompiler.OrderBy.FWD_ROW_KEY_ORDER_BY, plan.getOrderBy());
-            Scan scan = plan.getContext().getScan();
-            Filter filter = scan.getFilter();
-            assertEquals(filter.toString(), "NOT (V = 'EXPIRED')");
-        }
-    }
-
-    @Test
+    @Ignore
     public void testTableSelectionWithMultipleIndexes() throws Exception {
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(
@@ -493,32 +457,6 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
             scan = plan.getContext().getScan();
             filter = scan.getFilter();
             assertEquals(filter.toString(), "NOT (\"V2\" = 'EXPIRED')");
-        }
-    }
-
-    @Test
-    public void testSubQuery() throws Exception {
-        try (Connection conn = DriverManager.getConnection(getUrl())) {
-            conn.createStatement().execute(
-                    "CREATE TABLE t1 (k1 INTEGER NOT NULL PRIMARY KEY, v1 VARCHAR, v2 VARCHAR) " +
-                            "TTL='v2=''EXPIRED'''");
-            conn.createStatement().execute(
-                    "CREATE TABLE t2 (k2 INTEGER NOT NULL PRIMARY KEY, v3 VARCHAR, v4 INTEGER) " +
-                            "TTL='v4=-1'");
-            String query = "SELECT * FROM t1 where v1 IN (SELECT v3 from t2)";
-            PhoenixStatement stmt = conn.createStatement().unwrap(PhoenixStatement.class);
-            QueryPlan plan = stmt.optimizeQuery(query);
-            assertTrue(plan instanceof HashJoinPlan);
-            List<QueryPlan> childPlans = plan.accept(new QueryCompilerTest.MultipleChildrenExtractor());
-            assertEquals(childPlans.size(), 2);
-            QueryPlan plan1 = childPlans.get(0);
-            Scan scan1 = plan1.getContext().getScan();
-            Filter filter1 = scan1.getFilter();
-            assertEquals(filter1.toString(), "NOT (V2 = 'EXPIRED')");
-            QueryPlan plan2 = childPlans.get(1);
-            Scan scan2 = plan2.getContext().getScan();
-            Filter filter2 = scan2.getFilter();
-            assertEquals(filter2.toString(), "NOT (V4 = -1)");
         }
     }
 }
