@@ -31,7 +31,6 @@ import static org.junit.Assert.fail;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Set;
@@ -39,14 +38,9 @@ import java.util.Set;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
-import org.apache.phoenix.compile.OrderByCompiler;
-import org.apache.phoenix.compile.QueryCompilerTest;
 import org.apache.phoenix.compile.QueryPlan;
 import org.apache.phoenix.exception.PhoenixParserException;
-import org.apache.phoenix.exception.SQLExceptionCode;
-import org.apache.phoenix.execute.HashJoinPlan;
 import org.apache.phoenix.hbase.index.covered.update.ColumnReference;
-import org.apache.phoenix.iterate.ResultIterator;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.jdbc.PhoenixStatement;
@@ -65,68 +59,6 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
     private static void assertTTL(Connection conn, String tableName, TTLExpression expected) throws SQLException {
         PTable table = conn.unwrap(PhoenixConnection.class).getTable(tableName);
         assertEquals(expected, table.getTTL());
-    }
-
-    private static void assertScanConditionTTL(Scan scan, Scan scanWithCondTTL) {
-        assertEquals(scan.includeStartRow(), scanWithCondTTL.includeStartRow());
-        assertArrayEquals(scan.getStartRow(), scanWithCondTTL.getStartRow());
-        assertEquals(scan.includeStopRow(), scanWithCondTTL.includeStopRow());
-        assertArrayEquals(scan.getStopRow(), scanWithCondTTL.getStopRow());
-        Filter filter = scan.getFilter();
-        Filter filterCondTTL = scanWithCondTTL.getFilter();
-        assertNotNull(filter);
-        assertNotNull(filterCondTTL);
-        if (filter instanceof FilterList) {
-            assertTrue(filterCondTTL instanceof FilterList);
-            FilterList filterList = (FilterList) filter;
-            FilterList filterListCondTTL = (FilterList) filterCondTTL;
-            // ultimately compares the individual filters
-            assertEquals(filterList, filterListCondTTL);
-        } else {
-            assertEquals(filter, filterCondTTL);
-        }
-    }
-
-    private void compareScanWithCondTTL(Connection conn,
-                                        String tableNoTTL,
-                                        String tableWithTTL,
-                                        String queryTemplate,
-                                        String ttl) throws SQLException {
-        compareScanWithCondTTL(conn, tableNoTTL, tableWithTTL, queryTemplate, ttl, false);
-    }
-
-    private void compareScanWithCondTTL(Connection conn,
-                                        String tableNoTTL,
-                                        String tableWithTTL,
-                                        String queryTemplate,
-                                        String ttl,
-                                        boolean useIndex) throws SQLException {
-        PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
-        String query;
-        // Modify the query by adding the cond ttl expression explicitly to the WHERE clause
-        if (queryTemplate.toUpperCase().contains(" WHERE ")) {
-            // append the cond TTL expression to the WHERE clause
-            query = String.format(queryTemplate + " AND NOT (%s)", tableNoTTL, ttl);
-        } else {
-            // add a WHERE clause with negative cond ttl expression
-            query = String.format(queryTemplate + " WHERE NOT (%s)", tableNoTTL, ttl);
-        }
-        PhoenixPreparedStatement pstmt = new PhoenixPreparedStatement(pconn, query);
-        QueryPlan plan = pstmt.optimizeQuery();
-        if (useIndex) {
-            assertTrue(plan.getTableRef().getTable().getType() == INDEX);
-        }
-        Scan scanNoTTL = plan.getContext().getScan();
-        // now execute the same query with cond ttl expression implicitly used for masking
-        query = String.format(queryTemplate, tableWithTTL);
-        pstmt = new PhoenixPreparedStatement(pconn, query);
-        plan = pstmt.optimizeQuery();
-        if (useIndex) {
-            assertTrue(plan.getTableRef().getTable().getType() == INDEX);
-        }
-        ResultIterator iterator = plan.iterator();
-        Scan scanWithCondTTL = plan.getContext().getScan();
-        assertScanConditionTTL(scanNoTTL, scanWithCondTTL);
     }
 
     private void validateScan(Connection conn,
@@ -217,8 +149,10 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
             conn.createStatement().execute(ddl);
             fail();
         } catch (SQLException e) {
-            assertEquals(CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
-                e.getErrorCode());
+            assertEquals(
+                CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
+                e.getErrorCode()
+            );
         } catch (Exception e) {
             fail("Unknown exception " + e);
         }
@@ -228,7 +162,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
     public void testSingleNonDefaultColumnFamilyIsAllowed() throws SQLException {
         String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
                 "A.col1 varchar, A.col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
-        String ttl = "A.col1 = 'expired' AND A.col2 + 10 > CURRENT_DATE()";
+        String ttl = "col1 = 'expired' AND col2 + 10 > CURRENT_DATE()";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
         try (Connection conn = DriverManager.getConnection(getUrl())) {
@@ -241,13 +175,36 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
     public void testDefaultColumnFamily() throws SQLException {
         String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
                 "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'," +
-                "DEFAULT_COLUMN_FAMILY='cf'";
-        String ttl = "col1 = 'expired' AND col2 + 10 > CURRENT_DATE()";
+                "DEFAULT_COLUMN_FAMILY='CF'";
+        String ttl = "col1 = 'expired' AND CF.col2 + 10 > CURRENT_DATE()";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
             assertConditonTTL(conn, tableName, ttl);
+        }
+    }
+
+    @Test
+    public void testMultipleColumnFamilyNotAllowedOnAlter() throws SQLException {
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "A.col1 varchar, col2 date constraint pk primary key (k1,k2 desc))";
+        String ttl = "A.col1 = 'expired'";
+        String tableName = generateUniqueName();
+        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(ddl);
+            String alterDDL = String.format("alter table %s set TTL = '%s'",
+                    tableName, retainSingleQuotes(ttl));
+            conn.createStatement().execute(alterDDL);
+            fail();
+        } catch (SQLException e) {
+            assertEquals(
+                    CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
+                    e.getErrorCode()
+            );
+        } catch (Exception e) {
+            fail("Unknown exception " + e);
         }
     }
 

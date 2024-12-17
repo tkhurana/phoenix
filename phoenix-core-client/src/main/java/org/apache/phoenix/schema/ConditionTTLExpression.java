@@ -57,7 +57,6 @@ import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.SQLExceptionInfo;
 import org.apache.phoenix.expression.Expression;
 import org.apache.phoenix.expression.ExpressionType;
-import org.apache.phoenix.expression.KeyValueColumnExpression;
 import org.apache.phoenix.hbase.index.covered.update.ColumnReference;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixStatement;
@@ -71,8 +70,9 @@ import org.apache.phoenix.parse.TableName;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.schema.tuple.MultiKeyValueTuple;
 import org.apache.phoenix.schema.types.PBoolean;
-import org.apache.phoenix.schema.types.PDataType;
+import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Sets;
+import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.SchemaUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -184,37 +184,6 @@ public class ConditionTTLExpression extends TTLExpression {
         return ttl;
     }
 
-    @Override
-    public void validateTTLOnCreation(PhoenixConnection conn,
-                                      CreateTableStatement create,
-                                      Map<String, Object> tableProps) throws SQLException {
-        validateFamilyCount(create, tableProps);
-        ParseNode ttlCondition = SQLParser.parseCondition(this.ttlExpr);
-        StatementContext ttlValidationContext = new StatementContext(new PhoenixStatement(conn));
-        // Construct a PTable with just enough information to be able to compile the TTL expression
-        PTable newTable = createTempPTable(conn, create);
-        ttlValidationContext.setCurrentTable(new TableRef(newTable));
-        VerifyCreateConditionalTTLExpression condTTLVisitor =
-                new VerifyCreateConditionalTTLExpression(conn, ttlValidationContext, create);
-        Expression ttlExpression = ttlCondition.accept(condTTLVisitor);
-        validateTTLExpression(ttlExpression, condTTLVisitor);
-    }
-
-    @Override
-    public void validateTTLOnAlter(PhoenixConnection conn, PTable table) throws SQLException {
-        if (table.getColumnFamilies().size() > 1) {
-            throw new SQLExceptionInfo.Builder(
-                    SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES)
-                    .build().buildException();
-        }
-        ParseNode ttlCondition = SQLParser.parseCondition(this.ttlExpr);
-        ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
-        StatementContext context = new StatementContext(new PhoenixStatement(conn), resolver);
-        ExpressionCompiler expressionCompiler = new ExpressionCompiler(context);
-        Expression ttlExpression = ttlCondition.accept(expressionCompiler);
-        validateTTLExpression(ttlExpression, expressionCompiler);
-    }
-
     private static byte[] serializeExpression(Expression condTTLExpr) throws IOException {
         try (ByteArrayOutputStream stream = new ByteArrayOutputStream()) {
             DataOutput output = new DataOutputStream(stream);
@@ -250,6 +219,7 @@ public class ConditionTTLExpression extends TTLExpression {
         return new ConditionTTLExpression(ttlExpr, compiledExpression, conditionExprColumns);
     }
 
+    @Override
     public PTableProtos.TTLExpression toProto(PhoenixConnection connection,
                                               PTable table) throws SQLException, IOException {
         Pair<Expression, Set<ColumnReference>> exprAndCols = buildExpression(connection, table);
@@ -269,7 +239,7 @@ public class ConditionTTLExpression extends TTLExpression {
         return ttl.build();
     }
 
-    public ParseNode parseExpression(PhoenixConnection connection,
+    private ParseNode parseExpression(PhoenixConnection connection,
                                      PTable table) throws SQLException {
         ParseNode ttlCondition = SQLParser.parseCondition(this.ttlExpr);
         return table.getType() != PTableType.INDEX ? ttlCondition
@@ -296,6 +266,27 @@ public class ConditionTTLExpression extends TTLExpression {
         StatementContext context = new StatementContext(new PhoenixStatement(connection), resolver);
         WhereExpressionCompiler expressionCompiler = new WhereExpressionCompiler(context);
         return ttlCondition.accept(expressionCompiler);
+    }
+
+    @Override
+    public void validateTTLOnCreation(PhoenixConnection conn,
+                                      CreateTableStatement create,
+                                      Map<String, Object> tableProps) throws SQLException {
+        // Construct a PTable with just enough information to be able to compile the TTL expression
+        PTable table = createTempPTable(conn, create, tableProps);
+        ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
+        StatementContext context = new StatementContext(new PhoenixStatement(conn), resolver);
+        VerifyCreateConditionalTTLExpression condTTLVisitor =
+                new VerifyCreateConditionalTTLExpression(conn, context, create);
+        validateTTLExpression(table, condTTLVisitor);
+    }
+
+    @Override
+    public void validateTTLOnAlter(PhoenixConnection conn, PTable table) throws SQLException {
+        ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
+        StatementContext context = new StatementContext(new PhoenixStatement(conn), resolver);
+        ExpressionCompiler expressionCompiler = new ExpressionCompiler(context);
+        validateTTLExpression(table, expressionCompiler);
     }
 
     @Override
@@ -357,40 +348,15 @@ public class ConditionTTLExpression extends TTLExpression {
 
         @Override
         public Expression visit(ColumnParseNode node) throws SQLException {
-            // First check current table
-            for (ColumnDef columnDef : create.getColumnDefs()) {
-                ColumnName columnName = columnDef.getColumnDefName();
-                // Takes family name into account
-                if (columnName.toString().equals(node.getFullName())) {
-                    String cf = columnName.getFamilyName();
-                    String cq = columnName.getColumnName();
-                    return new KeyValueColumnExpression( new PDatum() {
-                        @Override
-                        public boolean isNullable() {
-                            return columnDef.isNull();
-                        }
-                        @Override
-                        public PDataType getDataType() {
-                            return columnDef.getDataType();
-                        }
-                        @Override
-                        public Integer getMaxLength() {
-                            return columnDef.getMaxLength();
-                        }
-                        @Override
-                        public Integer getScale() {
-                            return columnDef.getScale();
-                        }
-                        @Override
-                        public SortOrder getSortOrder() {
-                            return columnDef.getSortOrder();
-                        }
-                    }, cf != null ? Bytes.toBytes(cf) : null, Bytes.toBytes(cq));
-                }
+            ColumnRef columnRef = null;
+            try {
+                // First check current table
+                columnRef = resolveColumn(node);
+            } catch (ColumnNotFoundException e) {
+                // Column used in TTL expression not found in current, check the parent
+                columnRef = baseTableResolver.resolveColumn(
+                        node.getSchemaName(), node.getTableName(), node.getName());
             }
-            // Column used in TTL expression not found in current, check the parent
-            ColumnRef columnRef = baseTableResolver.resolveColumn(
-                    node.getSchemaName(), node.getTableName(), node.getName());
             return columnRef.newColumnExpression(node.isTableNameCaseSensitive(), node.isCaseSensitive());
         }
     }
@@ -400,67 +366,83 @@ public class ConditionTTLExpression extends TTLExpression {
      * the PTable yet, but we need one for compiling the conditional TTL expression so let's
      * build the PTable object with just enough information to be able to compile the Conditional
      * TTL expression statement.
-     * @param statement
+     * @param createStmt
      * @return
      * @throws SQLException
      */
-    private PTable createTempPTable(PhoenixConnection conn, CreateTableStatement statement) throws SQLException {
-        final TableName tableNameNode = statement.getTableName();
+    private PTable createTempPTable(PhoenixConnection conn,
+                                    CreateTableStatement createStmt,
+                                    Map<String, Object> tableProps) throws SQLException {
+        final TableName tableNameNode = createStmt.getTableName();
         final PName schemaName = PNameFactory.newName(tableNameNode.getSchemaName());
         final PName tableName = PNameFactory.newName(tableNameNode.getTableName());
         PName fullName = SchemaUtil.getTableName(schemaName, tableName);
         final PName tenantId = conn.getTenantId();
+        String defaultFamily = (String) TableProperty.DEFAULT_COLUMN_FAMILY.getValue(tableProps);
+        List<PColumn> allCols = Lists.newArrayList();
+        List<PColumn> pkCols = Lists.newArrayList();
+        int pos = 0;
+        for (ColumnDef colDef : createStmt.getColumnDefs()) {
+            ColumnName columnDefName = colDef.getColumnDefName();
+            String columnName = columnDefName.getColumnName();
+            PName familyName = null;
+            boolean isPK = isPKColumn(createStmt.getPrimaryKeyConstraint(), colDef);
+            if (!isPK) {   // PK columns always have null column family
+                String family = columnDefName.getFamilyName();
+                if (family != null) {
+                    familyName = PNameFactory.newName(family);
+                } else {
+                    familyName = PNameFactory.newName(defaultFamily == null ?
+                            QueryConstants.DEFAULT_COLUMN_FAMILY : defaultFamily);
+                }
+            }
+            PColumn pColumn = new PColumnImpl(PNameFactory.newName(columnName), familyName,
+                    colDef.getDataType(), colDef.getMaxLength(), colDef.getScale(),
+                    colDef.isNull(), pos++, colDef.getSortOrder(), colDef.getArraySize(), null,
+                    false, colDef.getExpression(), colDef.isRowTimestamp(), false,
+                    Bytes.toBytes(columnName), EnvironmentEdgeManager.currentTimeMillis());
+            allCols.add(pColumn);
+            if (isPK) {
+                pkCols.add(pColumn);
+            }
+        }
+
         return new PTableImpl.Builder()
                 .setName(fullName)
                 .setKey(new PTableKey(tenantId, fullName.getString()))
                 .setTenantId(tenantId)
                 .setSchemaName(schemaName)
                 .setTableName(tableName)
-                .setType(statement.getTableType())
+                .setPhysicalNames(Collections.EMPTY_LIST)
+                .setType(createStmt.getTableType())
                 .setImmutableStorageScheme(ONE_CELL_PER_COLUMN)
                 .setQualifierEncodingScheme(NON_ENCODED_QUALIFIERS)
-                .setFamilies(Collections.EMPTY_LIST)
+                .setDefaultFamilyName(PNameFactory.newName(defaultFamily))
+                .setColumns(allCols)
+                .setPkColumns(pkCols)
                 .setIndexes(Collections.EMPTY_LIST)
                 .build();
     }
 
-    private void validateTTLExpression(Expression ttlExpression,
-                                       ExpressionCompiler expressionCompiler) throws SQLException {
+    private void validateTTLExpression(PTable table,
+                                       ExpressionCompiler exprCompiler) throws SQLException {
 
-        if (expressionCompiler.isAggregate()) {
+        if (table.getColumnFamilies().size() > 1) {
             throw new SQLExceptionInfo.Builder(
-                    SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION)
-                    .build().buildException();
+                SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES)
+                .build().buildException();
         }
-
+        ParseNode ttlCondition = SQLParser.parseCondition(this.ttlExpr);
+        Expression ttlExpression = ttlCondition.accept(exprCompiler);
+        if (exprCompiler.isAggregate()) {
+            throw new SQLExceptionInfo.Builder(
+                SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION)
+                .build().buildException();
+        }
         if (ttlExpression.getDataType() != PBoolean.INSTANCE) {
             throw TypeMismatchException.newException(PBoolean.INSTANCE,
-                    ttlExpression.getDataType(), ttlExpression.toString());
+                ttlExpression.getDataType(), ttlExpression.toString());
         }
     }
 
-    private void validateFamilyCount(CreateTableStatement create,
-                                     Map<String, Object> tableProps) throws SQLException {
-        String defaultFamilyName = (String)
-                TableProperty.DEFAULT_COLUMN_FAMILY.getValue(tableProps);
-        defaultFamilyName = (defaultFamilyName == null) ? QueryConstants.DEFAULT_COLUMN_FAMILY
-                : defaultFamilyName;
-        Set<String> families = Sets.newHashSet();
-        for (ColumnDef columnDef : create.getColumnDefs()) {
-            if (isPKColumn(create.getPrimaryKeyConstraint(), columnDef)) {
-                continue; // Ignore PK columns since they always have null column family
-            }
-            String familyName = columnDef.getColumnDefName().getFamilyName();
-            if (familyName != null) {
-                families.add(familyName);
-            } else {
-                families.add(defaultFamilyName);
-            }
-        }
-        if (families.size() > 1) {
-            throw new SQLExceptionInfo.Builder(
-                    SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES)
-                    .build().buildException();
-        }
-    }
 }
