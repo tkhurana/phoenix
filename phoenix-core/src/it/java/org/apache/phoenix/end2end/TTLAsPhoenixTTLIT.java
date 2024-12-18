@@ -325,7 +325,8 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
             try {
                 conn.createStatement().execute(String.format(ddl, tableName, "ID2 = 12 OR UNKNOWN_COLUMN = 67"));
                 fail("Should have thrown ColumnNotFoundException");
-            } catch (ColumnNotFoundException e) {
+            } catch (SQLException e) {
+                assertTrue(e.getCause() instanceof ColumnNotFoundException);
             }
             String ttl = "ID2 = 34 AND COL2 > CURRENT_DATE() + 1000";
             conn.createStatement().execute(String.format(ddl, tableName, ttl));
@@ -339,8 +340,8 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
                 conn.createStatement().execute(String.format("ALTER TABLE %s SET TTL='%s'",
                         tableName, "UNKNOWN_COLUMN=67"));
                 fail("Alter table should have thrown ColumnNotFoundException");
-            } catch (ColumnNotFoundException e) {
-
+            } catch (SQLException e) {
+                assertTrue(e.getCause() instanceof ColumnNotFoundException);
             }
 
             String viewName = generateUniqueName();
@@ -349,9 +350,10 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
             try {
                 conn.createStatement().execute(String.format(ddl, viewName, tableName, ttl));
                 fail("Should have thrown ColumnFamilyNotFoundException");
-            } catch (ColumnFamilyNotFoundException e) {
-
+            } catch (SQLException e) {
+                assertTrue(e.getCause() instanceof ColumnFamilyNotFoundException);
             }
+
             ttl = "COL2 > CURRENT_DATE() + 200 AND VINT > 123";
             conn.createStatement().execute(String.format(ddl, viewName, tableName, ttl));
             expected = TTLExpression.create(ttl);
@@ -586,13 +588,15 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
             case LOCAL:
                 String localIndexName = baseTableOrViewName + "_Local_" + generateUniqueName();
                 conn.createStatement().execute("CREATE LOCAL INDEX " + localIndexName + " ON " +
-                        baseTableOrViewName + " (COL2) " + (withTTL ? "TTL = " + ttl : ""));
+                        baseTableOrViewName + " (COL2) INCLUDE (CREATION_TIME)" +
+                        (withTTL ? "TTL = " + ttl : ""));
                 return localIndexName;
 
             case GLOBAL:
                 String globalIndexName = baseTableOrViewName + "_Global_" + generateUniqueName();
                 conn.createStatement().execute("CREATE INDEX " + globalIndexName + " ON " +
-                        baseTableOrViewName + " (COL2) " + (withTTL ? "TTL = " + ttl : ""));
+                        baseTableOrViewName + " (COL2) INCLUDE (CREATION_TIME) " +
+                        (withTTL ? "TTL = " + ttl : ""));
                 return globalIndexName;
 
             default:

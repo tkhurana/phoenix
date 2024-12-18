@@ -95,6 +95,7 @@ public abstract class TTLExpression {
 
     abstract public void validateTTLOnCreation(PhoenixConnection conn,
                                                CreateTableStatement create,
+                                               PTable parent,
                                                Map<String, Object> tableProps) throws SQLException;
 
     abstract public void validateTTLOnAlter(PhoenixConnection connection,

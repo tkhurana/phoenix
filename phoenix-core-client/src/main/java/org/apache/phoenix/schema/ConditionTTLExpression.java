@@ -20,6 +20,8 @@ package org.apache.phoenix.schema;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.DEFAULT_TTL;
 import static org.apache.phoenix.schema.PTable.ImmutableStorageScheme.ONE_CELL_PER_COLUMN;
 import static org.apache.phoenix.schema.PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS;
+import static org.apache.phoenix.schema.PTableType.INDEX;
+import static org.apache.phoenix.schema.PTableType.VIEW;
 import static org.apache.phoenix.util.SchemaUtil.isPKColumn;
 
 import java.io.ByteArrayInputStream;
@@ -74,6 +76,7 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Sets;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.SchemaUtil;
+import org.apache.phoenix.util.ViewUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -240,57 +243,63 @@ public class ConditionTTLExpression extends TTLExpression {
     }
 
     private ParseNode parseExpression(PhoenixConnection connection,
-                                     PTable table) throws SQLException {
+                                      PTable table,
+                                      PTable parent) throws SQLException {
         ParseNode ttlCondition = SQLParser.parseCondition(this.ttlExpr);
         return table.getType() != PTableType.INDEX ? ttlCondition
-                : rewriteForIndex(connection, table, ttlCondition);
+                : rewriteForIndex(connection, table, parent, ttlCondition);
     }
 
     private ParseNode rewriteForIndex(PhoenixConnection connection,
                                       PTable index,
+                                      PTable parent,
                                       ParseNode ttlCondition) throws SQLException {
-        for (Map.Entry<PTableKey, Long> entry : index.getAncestorLastDDLTimestampMap().entrySet()) {
-            PTableKey parentKey = entry.getKey();
-            PTable parent = connection.getTable(parentKey);
-            ColumnResolver parentResolver = FromCompiler.getResolver(new TableRef(parent));
-            return IndexStatementRewriter.translate(ttlCondition, parentResolver);
+        if (parent == null) {
+            parent = getParent(connection, index);
+        }
+        ColumnResolver parentResolver = FromCompiler.getResolver(new TableRef(parent));
+        return IndexStatementRewriter.translate(ttlCondition, parentResolver);
+    }
+
+    private PTable getParent(PhoenixConnection connection,
+                             PTable table) throws SQLException {
+        for (Map.Entry<PTableKey, Long> entry :
+                table.getAncestorLastDDLTimestampMap().entrySet()) {
+            return connection.getTable(entry.getKey());
         }
         // TODO: Fix exception
         throw new SQLException("Parent not found");
     }
 
-    private Expression getCompiledExpression(PhoenixConnection connection,
-                                             PTable table,
-                                             ParseNode ttlCondition) throws SQLException {
-        ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
-        StatementContext context = new StatementContext(new PhoenixStatement(connection), resolver);
-        WhereExpressionCompiler expressionCompiler = new WhereExpressionCompiler(context);
-        return ttlCondition.accept(expressionCompiler);
-    }
-
     @Override
     public void validateTTLOnCreation(PhoenixConnection conn,
                                       CreateTableStatement create,
+                                      PTable parent,
                                       Map<String, Object> tableProps) throws SQLException {
         // Construct a PTable with just enough information to be able to compile the TTL expression
-        PTable table = createTempPTable(conn, create, tableProps);
-        ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
-        StatementContext context = new StatementContext(new PhoenixStatement(conn), resolver);
-        VerifyCreateConditionalTTLExpression condTTLVisitor =
-                new VerifyCreateConditionalTTLExpression(conn, context, create);
-        validateTTLExpression(table, condTTLVisitor);
+        PTable table = createTempPTable(conn, create, parent, tableProps);
+        validateTTLExpression(conn, table, parent);
     }
 
     @Override
-    public void validateTTLOnAlter(PhoenixConnection conn, PTable table) throws SQLException {
-        ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
-        StatementContext context = new StatementContext(new PhoenixStatement(conn), resolver);
-        ExpressionCompiler expressionCompiler = new ExpressionCompiler(context);
-        validateTTLExpression(table, expressionCompiler);
+    public void validateTTLOnAlter(PhoenixConnection conn,
+                                   PTable table) throws SQLException {
+        validateTTLExpression(conn, table, null);
+        // verify that the expression is covered by all the existing indexes
+        for (PTable index : table.getIndexes()) {
+            try {
+                buildExpression(conn, index, table);
+            } catch (ColumnNotFoundException | ColumnFamilyNotFoundException e) {
+                throw new SQLException(String.format(
+                        "Condition TTL expression %s not covered by index %s", ttlExpr,
+                        index.getTableName()), e);
+            }
+        }
     }
 
     @Override
-    public Expression compileTTLExpression(PhoenixConnection connection, PTable table) throws IOException {
+    public Expression compileTTLExpression(PhoenixConnection connection,
+                                           PTable table) throws IOException {
         try {
             Pair<Expression, Set<ColumnReference>> expr = buildExpression(connection, table);
             compiledExpr = expr.getFirst();
@@ -301,10 +310,10 @@ public class ConditionTTLExpression extends TTLExpression {
         }
     }
 
-    private Pair<Expression, Set<ColumnReference>> buildExpression(
-            PhoenixConnection connection,
-            PTable table) throws SQLException {
-        ParseNode ttlCondition = parseExpression(connection, table);
+    private Pair<Expression, Set<ColumnReference>> buildExpression(PhoenixConnection connection,
+                                                                   PTable table,
+                                                                   PTable parent) throws SQLException {
+        ParseNode ttlCondition = parseExpression(connection, table, parent);
         ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
         StatementContext context = new StatementContext(
                 new PhoenixStatement(connection), resolver);
@@ -319,6 +328,11 @@ public class ConditionTTLExpression extends TTLExpression {
         return new Pair<>(expr, exprCols);
     }
 
+    private Pair<Expression, Set<ColumnReference>> buildExpression(PhoenixConnection connection,
+                                                                   PTable table) throws SQLException {
+        return buildExpression(connection, table, null);
+    }
+
     public synchronized Set<ColumnReference> getColumnsReferenced(
             PhoenixConnection connection,
             PTable table) throws SQLException {
@@ -329,49 +343,19 @@ public class ConditionTTLExpression extends TTLExpression {
     }
 
     /**
-     * Validates that all the columns used in the conditional TTL expression are present in the table
-     * or its parent table in case of view
-     */
-    private static class VerifyCreateConditionalTTLExpression extends ExpressionCompiler {
-        private final CreateTableStatement create;
-        private final ColumnResolver baseTableResolver;
-
-        private VerifyCreateConditionalTTLExpression(PhoenixConnection conn,
-                                                     StatementContext ttlExprValidationContext,
-                                                     CreateTableStatement create) throws SQLException {
-            super(ttlExprValidationContext);
-            this.create = create;
-            // Returns the resolver for base table if base table is not null (in case of views)
-            // Else, returns FromCompiler#EMPTY_TABLE_RESOLVER which is a no-op resolver
-            this.baseTableResolver = FromCompiler.getResolverForCreation(create, conn);
-        }
-
-        @Override
-        public Expression visit(ColumnParseNode node) throws SQLException {
-            ColumnRef columnRef = null;
-            try {
-                // First check current table
-                columnRef = resolveColumn(node);
-            } catch (ColumnNotFoundException e) {
-                // Column used in TTL expression not found in current, check the parent
-                columnRef = baseTableResolver.resolveColumn(
-                        node.getSchemaName(), node.getTableName(), node.getName());
-            }
-            return columnRef.newColumnExpression(node.isTableNameCaseSensitive(), node.isCaseSensitive());
-        }
-    }
-
-    /**
      * We are still in the middle of executing the CreateTable statement, so we don't have
      * the PTable yet, but we need one for compiling the conditional TTL expression so let's
      * build the PTable object with just enough information to be able to compile the Conditional
      * TTL expression statement.
      * @param createStmt
+     * @param parent
+     * @param tableProps
      * @return
      * @throws SQLException
      */
     private PTable createTempPTable(PhoenixConnection conn,
                                     CreateTableStatement createStmt,
+                                    PTable parent,
                                     Map<String, Object> tableProps) throws SQLException {
         final TableName tableNameNode = createStmt.getTableName();
         final PName schemaName = PNameFactory.newName(tableNameNode.getSchemaName());
@@ -407,12 +391,14 @@ public class ConditionTTLExpression extends TTLExpression {
             }
         }
 
-        return new PTableImpl.Builder()
+        PTable table = new PTableImpl.Builder()
                 .setName(fullName)
                 .setKey(new PTableKey(tenantId, fullName.getString()))
                 .setTenantId(tenantId)
                 .setSchemaName(schemaName)
                 .setTableName(tableName)
+                .setParentSchemaName((parent == null) ? null : parent.getSchemaName())
+                .setParentTableName((parent == null) ? null : parent.getTableName())
                 .setPhysicalNames(Collections.EMPTY_LIST)
                 .setType(createStmt.getTableType())
                 .setImmutableStorageScheme(ONE_CELL_PER_COLUMN)
@@ -422,27 +408,44 @@ public class ConditionTTLExpression extends TTLExpression {
                 .setPkColumns(pkCols)
                 .setIndexes(Collections.EMPTY_LIST)
                 .build();
+
+        if (parent != null) {
+            // add dervied columns for views
+            if (table.getType() == VIEW) {
+                table = ViewUtil.addDerivedColumnsFromParent(conn, table, parent);
+            }
+        }
+        return table;
     }
 
-    private void validateTTLExpression(PTable table,
-                                       ExpressionCompiler exprCompiler) throws SQLException {
+    private void validateTTLExpression(PhoenixConnection conn,
+                                       PTable table,
+                                       PTable parent) throws SQLException {
 
         if (table.getColumnFamilies().size() > 1) {
             throw new SQLExceptionInfo.Builder(
                 SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES)
                 .build().buildException();
         }
-        ParseNode ttlCondition = SQLParser.parseCondition(this.ttlExpr);
-        Expression ttlExpression = ttlCondition.accept(exprCompiler);
-        if (exprCompiler.isAggregate()) {
-            throw new SQLExceptionInfo.Builder(
-                SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION)
-                .build().buildException();
-        }
-        if (ttlExpression.getDataType() != PBoolean.INSTANCE) {
-            throw TypeMismatchException.newException(PBoolean.INSTANCE,
-                ttlExpression.getDataType(), ttlExpression.toString());
+        ParseNode ttlCondition = parseExpression(conn, table, parent);
+        ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
+        StatementContext context = new StatementContext(new PhoenixStatement(conn), resolver);
+        ExpressionCompiler expressionCompiler = new ExpressionCompiler(context);
+        try {
+            Expression ttlExpression = ttlCondition.accept(expressionCompiler);
+            if (expressionCompiler.isAggregate()) {
+                throw new SQLExceptionInfo.Builder(
+                        SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION)
+                        .build().buildException();
+            }
+            if (ttlExpression.getDataType() != PBoolean.INSTANCE) {
+                throw TypeMismatchException.newException(PBoolean.INSTANCE,
+                        ttlExpression.getDataType(), ttlExpression.toString());
+            }
+        } catch (ColumnNotFoundException | ColumnFamilyNotFoundException e) {
+                throw new SQLException(String.format(
+                        "Condition TTL expression %s refers columns not in %s", ttlExpr,
+                        table.getTableName()), e);
         }
     }
-
 }

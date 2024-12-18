@@ -200,8 +200,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
             fail();
         } catch (SQLException e) {
             assertEquals(
-                    CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
-                    e.getErrorCode()
+                CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
+                e.getErrorCode()
             );
         } catch (Exception e) {
             fail("Unknown exception " + e);
@@ -219,8 +219,9 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
             conn.createStatement().execute(ddl);
             fail();
         } catch (SQLException e) {
-            assertEquals(AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION.getErrorCode(),
-                    e.getErrorCode());
+            assertEquals(
+                AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION.getErrorCode(),
+                e.getErrorCode());
         } catch (Exception e) {
             fail("Unknown exception " + e);
         }
@@ -339,8 +340,10 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         String tableName = generateUniqueName();
         String parentView = generateUniqueName();
         String childView = generateUniqueName();
+        String indexName = generateUniqueName();
         String parentViewTemplate = "create view %s (k3 smallint) as select * from %s WHERE k1=7";
         String childViewTemplate = "create view %s as select * from %s TTL = '%s'";
+        String indexOnChildTemplate = "create index %s ON %s (k3) include (col1, k2)";
         String ttl = "k2 = 34 and k3 = -1";
         String ddl = String.format(ddlTemplate, tableName);
         try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
@@ -352,6 +355,10 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
             assertTTL(conn, tableName, TTLExpression.TTL_EXPRESSION_NOT_DEFINED);
             assertTTL(conn, parentView, TTLExpression.TTL_EXPRESSION_NOT_DEFINED);
             assertConditonTTL(conn, childView, ttl);
+            // create an index on child view
+            ddl = String.format(indexOnChildTemplate, indexName, childView);
+            conn.createStatement().execute(ddl);
+            assertConditonTTL(conn, indexName, ttl);
         }
     }
 
@@ -393,27 +400,48 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         }
     }
 
-    @Ignore
-    public void testTableSelectionWithMultipleIndexes() throws Exception {
+    @Test
+    public void testCreatingIndexWithMissingExprCols() throws Exception {
+        String ddlTemplate = "create table %s (id varchar not null primary key, " +
+                "col1 integer, col2 integer, col3 double, col4 varchar) TTL = '%s'";
+        String tableName = generateUniqueName();
+        String indexTemplate = "create index %s on %s (col1) include (col2)";
+        String indexName = generateUniqueName();
+        String ttl = "col2 > 100 AND col4='expired'";
         try (Connection conn = DriverManager.getConnection(getUrl())) {
-            conn.createStatement().execute(
-                    "CREATE TABLE t (k INTEGER NOT NULL PRIMARY KEY, v1 VARCHAR, v2 VARCHAR) " +
-                            "IMMUTABLE_ROWS=true,TTL='v2=''EXPIRED'''");
-            conn.createStatement().execute("CREATE INDEX idx ON t(v1)");
-            PhoenixStatement stmt = conn.createStatement().unwrap(PhoenixStatement.class);
-            QueryPlan plan = stmt.optimizeQuery("SELECT v1 FROM t WHERE v1 = 'bar'");
-            // T is chosen because TTL expression is on v2 which is not present in index
-            assertEquals("T", plan.getTableRef().getTable().getTableName().getString());
-            Scan scan = plan.getContext().getScan();
-            Filter filter = scan.getFilter();
-            assertEquals(filter.toString(), "(V1 = 'bar' AND NOT (V2 = 'EXPIRED'))");
-            conn.createStatement().execute("CREATE INDEX idx2 ON t(v1,v2)");
-            plan = stmt.optimizeQuery("SELECT v1 FROM t WHERE v1 = 'bar'");
-            // Now IDX2 should be chosen
-            assertEquals("IDX2", plan.getTableRef().getTable().getTableName().getString());
-            scan = plan.getContext().getScan();
-            filter = scan.getFilter();
-            assertEquals(filter.toString(), "NOT (\"V2\" = 'EXPIRED')");
+            String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+            conn.createStatement().execute(ddl);
+            ddl = String.format(indexTemplate, indexName, tableName);
+            try {
+                conn.createStatement().execute(ddl);
+                fail("Should have thrown ColumnNotFoundException");
+            } catch (SQLException e) {
+                assertTrue(e.getCause() instanceof ColumnNotFoundException);
+            }
+        }
+    }
+
+    @Test
+    public void testSettingCondTTLOnTableWithIndexWithMissingExprCols() throws Exception {
+        String ddlTemplate = "create table %s (id varchar not null primary key, " +
+                "col1 integer, col2 integer, col3 double, col4 varchar)";
+        String tableName = generateUniqueName();
+        String indexTemplate = "create index %s on %s (col1) include (col2)";
+        String indexName = generateUniqueName();
+        String ttl = "col2 > 100 AND col4='expired'";
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String ddl = String.format(ddlTemplate, tableName);
+            conn.createStatement().execute(ddl);
+            ddl = String.format(indexTemplate, indexName, tableName);
+            conn.createStatement().execute(ddl);
+            ddl = String.format("alter table %s set TTL = '%s'",
+                    tableName, retainSingleQuotes(ttl));
+            try {
+                conn.createStatement().execute(ddl);
+                fail("Should have thrown ColumnNotFoundException");
+            } catch (SQLException e) {
+                assertTrue(e.getCause() instanceof ColumnNotFoundException);
+            }
         }
     }
 }

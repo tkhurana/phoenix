@@ -2467,7 +2467,7 @@ public class MetaDataClient {
                             .buildException();
                 }
                 try {
-                    ttlProp.validateTTLOnCreation(connection, statement, tableProps);
+                    ttlProp.validateTTLOnCreation(connection, statement, parent, tableProps);
                 } catch (IllegalArgumentException e) {
                     throw new SQLExceptionInfo.Builder(SQLExceptionCode.ILLEGAL_DATA)
                             .setMessage(e.getMessage())
@@ -2479,6 +2479,12 @@ public class MetaDataClient {
                 ttl = ttlProp;
             } else {
                 ttlFromHierarchy = checkAndGetTTLFromHierarchy(parent);
+                if (ttlFromHierarchy != TTL_EXPRESSION_NOT_DEFINED) {
+                    ttlFromHierarchy.validateTTLOnCreation(connection,
+                            statement,
+                            parent,
+                            tableProps);
+                }
             }
 
             Boolean isChangeDetectionEnabledProp =

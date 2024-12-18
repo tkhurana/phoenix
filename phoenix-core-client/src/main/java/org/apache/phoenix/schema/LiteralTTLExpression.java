@@ -72,7 +72,9 @@ public class LiteralTTLExpression extends TTLExpression {
 
     @Override
     public void validateTTLOnCreation(PhoenixConnection conn,
-                                      CreateTableStatement create, Map<String, Object> tableProps) throws SQLException {
+                                      CreateTableStatement create,
+                                      PTable parent,
+                                      Map<String, Object> tableProps) throws SQLException {
 
     }
 
