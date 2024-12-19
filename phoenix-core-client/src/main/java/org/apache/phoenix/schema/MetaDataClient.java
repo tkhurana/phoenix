@@ -5215,6 +5215,20 @@ public class MetaDataClient {
                     else if (columnToDrop.isViewReferenced()) {
                         throw new SQLExceptionInfo.Builder(SQLExceptionCode.CANNOT_DROP_VIEW_REFERENCED_COL)
                                 .setColumnName(columnToDrop.getName().getString()).build().buildException();
+                    } else if (table.hasConditionTTL()) {
+                        ConditionTTLExpression ttlExpr = (ConditionTTLExpression) table.getTTL();
+                        Set<ColumnReference> colsReferencedInTTLExpr =
+                                ttlExpr.getColumnsReferenced(connection, table);
+                        ColumnReference colDropRef = new ColumnReference(
+                                columnToDrop.getFamilyName() == null ?
+                                        null : columnToDrop.getFamilyName().getBytes(),
+                                columnToDrop.getColumnQualifierBytes());
+                        if (colsReferencedInTTLExpr.contains(colDropRef)) {
+                            throw new SQLExceptionInfo.Builder(
+                                    SQLExceptionCode.CANNOT_DROP_COL_REFERENCED_IN_CONDITION_TTL)
+                                    .setColumnName(columnToDrop.getName().getString())
+                                    .build().buildException();
+                        }
                     }
                     columnsToDrop.add(new ColumnRef(columnRef.getTableRef(), columnToDrop.getPosition()));
                     // check if client is already holding a mutex from previous retry

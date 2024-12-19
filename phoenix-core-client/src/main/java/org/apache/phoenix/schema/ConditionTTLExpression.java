@@ -20,7 +20,6 @@ package org.apache.phoenix.schema;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.DEFAULT_TTL;
 import static org.apache.phoenix.schema.PTable.ImmutableStorageScheme.ONE_CELL_PER_COLUMN;
 import static org.apache.phoenix.schema.PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS;
-import static org.apache.phoenix.schema.PTableType.INDEX;
 import static org.apache.phoenix.schema.PTableType.VIEW;
 import static org.apache.phoenix.util.SchemaUtil.isPKColumn;
 
@@ -64,7 +63,6 @@ import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixStatement;
 import org.apache.phoenix.parse.ColumnDef;
 import org.apache.phoenix.parse.ColumnName;
-import org.apache.phoenix.parse.ColumnParseNode;
 import org.apache.phoenix.parse.CreateTableStatement;
 import org.apache.phoenix.parse.ParseNode;
 import org.apache.phoenix.parse.SQLParser;
@@ -435,7 +433,7 @@ public class ConditionTTLExpression extends TTLExpression {
             Expression ttlExpression = ttlCondition.accept(expressionCompiler);
             if (expressionCompiler.isAggregate()) {
                 throw new SQLExceptionInfo.Builder(
-                        SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION)
+                        SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_CONDITION_TTL)
                         .build().buildException();
             }
             if (ttlExpression.getDataType() != PBoolean.INSTANCE) {

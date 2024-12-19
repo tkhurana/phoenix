@@ -17,12 +17,11 @@
  */
 package org.apache.phoenix.schema;
 
-import static org.apache.phoenix.exception.SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION;
+import static org.apache.phoenix.exception.SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_CONDITION_TTL;
+import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_DROP_COL_REFERENCED_IN_CONDITION_TTL;
 import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES;
 import static org.apache.phoenix.schema.PTableType.INDEX;
-import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
 import static org.apache.phoenix.util.TestUtil.retainSingleQuotes;
-import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
@@ -36,17 +35,12 @@ import java.util.NavigableSet;
 import java.util.Set;
 
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.filter.Filter;
-import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.phoenix.compile.QueryPlan;
 import org.apache.phoenix.exception.PhoenixParserException;
 import org.apache.phoenix.hbase.index.covered.update.ColumnReference;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
-import org.apache.phoenix.jdbc.PhoenixStatement;
 import org.apache.phoenix.query.BaseConnectionlessQueryTest;
-import org.apache.phoenix.util.PropertiesUtil;
-import org.junit.Ignore;
 import org.junit.Test;
 
 public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
@@ -223,10 +217,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
                 conn.createStatement().execute(alterDDL);
                 fail();
             } catch (SQLException e) {
-                assertEquals(
-                        CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
-                        e.getErrorCode()
-                );
+                assertEquals(CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES
+                                .getErrorCode(), e.getErrorCode());
             } catch (Exception e) {
                 fail("Unknown exception " + e);
             }
@@ -250,10 +242,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
                 conn.createStatement().execute(alterDDL);
                 fail();
             } catch (SQLException e) {
-                assertEquals(
-                        CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
-                        e.getErrorCode()
-                );
+                assertEquals(CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES
+                                .getErrorCode(), e.getErrorCode());
             } catch (Exception e) {
                 fail("Unknown exception " + e);
             }
@@ -279,15 +269,36 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
                 conn.createStatement().execute(alterDDL);
                 fail();
             } catch (SQLException e) {
-                assertEquals(
-                        CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
-                        e.getErrorCode()
-                );
+                assertEquals(CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES
+                                .getErrorCode(), e.getErrorCode());
             } catch (Exception e) {
                 fail("Unknown exception " + e);
             }
             alterDDL = String.format("alter table %s add col3 varchar", tableName);
             conn.createStatement().execute(alterDDL);
+        }
+    }
+
+    @Test
+    public void testDropColumnNotAllowed() throws SQLException {
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ttl = "col1 = 'expired' AND col2 + 30 < CURRENT_DATE()";
+        String tableName = generateUniqueName();
+        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(ddl);
+            // drop column referenced in TTL expression
+            String alterDDL = String.format("alter table %s drop column col2", tableName);
+            try {
+                conn.createStatement().execute(alterDDL);
+                fail();
+            } catch (SQLException e) {
+                assertEquals(CANNOT_DROP_COL_REFERENCED_IN_CONDITION_TTL.getErrorCode(),
+                        e.getErrorCode());
+            } catch (Exception e) {
+                fail("Unknown exception " + e);
+            }
         }
     }
 
@@ -303,7 +314,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
             fail();
         } catch (SQLException e) {
             assertEquals(
-                AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_TTL_EXPRESSION.getErrorCode(),
+                AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_CONDITION_TTL.getErrorCode(),
                 e.getErrorCode());
         } catch (Exception e) {
             fail("Unknown exception " + e);
@@ -355,8 +366,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
 
     @Test
     public void testNot() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, expired BOOLEAN " +
-                "constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "expired BOOLEAN constraint pk primary key (k1,k2 desc)) TTL = '%s'";
         String ttl = "NOT expired";
         String tableName = generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, ttl);
@@ -384,8 +395,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
 
     @Test
     public void testBooleanCaseExpression() throws SQLException {
-        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null, col1 varchar, status char(1) " +
-                "constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, status char(1) constraint pk primary key (k1,k2 desc)) TTL = '%s'";
         String ttl = "CASE WHEN status = ''E'' THEN TRUE ELSE FALSE END";
         String expectedTTLExpr = "CASE WHEN status = 'E' THEN TRUE ELSE FALSE END";
         String tableName = generateUniqueName();
@@ -402,7 +413,8 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
                 "k2 bigint, col1 varchar, status char(1))";
         String tableName = generateUniqueName();
         String viewName = generateUniqueName();
-        String viewTemplate = "create view %s (k3 smallint) as select * from %s WHERE k1=7 TTL = '%s'";
+        String viewTemplate = "create view %s (k3 smallint) as select * from %s WHERE k1=7 " +
+                "TTL = '%s'";
         String ttl = "k2 = 34 and k3 = -1";
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             String ddl = String.format(ddlTemplate, tableName);
@@ -429,7 +441,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
         String indexOnChildTemplate = "create index %s ON %s (k3) include (col1, k2)";
         String ttl = "k2 = 34 and k3 = -1";
         String ddl = String.format(ddlTemplate, tableName);
-        try (Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES))) {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
             ddl = String.format(parentViewTemplate, parentView, tableName);
             conn.createStatement().execute(ddl);
