@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.schema;
 
+import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES;
 import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_TRANSFORM_TRANSACTIONAL_TABLE;
 import static org.apache.phoenix.exception.SQLExceptionCode.ERROR_WRITING_TO_SCHEMA_REGISTRY;
 import static org.apache.phoenix.exception.SQLExceptionCode.TABLE_ALREADY_EXIST;
@@ -4465,7 +4466,6 @@ public class MetaDataClient {
         boolean acquiredBaseTableMutex = false;
         try {
             connection.setAutoCommit(false);
-
             List<ColumnDef> columnDefs;
             if ((table.isAppendOnlySchema() || ifNotExists) && origColumnDefs != null) {
                 // only make the rpc if we are adding new columns
@@ -4567,9 +4567,6 @@ public class MetaDataClient {
                      * byte[], byte[], List, int)} we are already traversing through
                      * allDescendantViews.
                      */
-
-
-
                 }
 
                 boolean isTransformNeeded = TransformClient.checkIsTransformNeeded(metaProperties, schemaName, table, tableName, null, tenantIdToUse, connection);
@@ -4623,6 +4620,23 @@ public class MetaDataClient {
                         }
                         if (!colDef.validateDefault(context, null)) {
                             colDef = new ColumnDef(colDef, null); // Remove DEFAULT as it's not necessary
+                        }
+                        if (!colDef.isPK() && table.hasConditionTTL()) {
+                            // Only 1 column family is allowed if the table has condition TTL
+                            PColumnFamily family = table.getColumnFamilies().get(0);
+                            String tableFamilyName = family.getName().getString();
+                            String colFamilyName = colDef.getColumnDefName().getFamilyName();
+                            if (colFamilyName == null) {
+                                colFamilyName = table.getDefaultFamilyName() == null ?
+                                        DEFAULT_COLUMN_FAMILY :
+                                        table.getDefaultFamilyName().getString();
+                            }
+                            if (!colFamilyName.equals(tableFamilyName)) {
+                                throw new SQLExceptionInfo.Builder(
+                                        CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES)
+                                        .setMessage(String.format("Cannot add column %s", colDef))
+                                        .build().buildException();
+                            }
                         }
                         String familyName = null;
                         Integer encodedCQ = null;

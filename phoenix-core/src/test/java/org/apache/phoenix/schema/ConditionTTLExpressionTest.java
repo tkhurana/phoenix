@@ -191,7 +191,7 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
                 "A.col1 varchar, col2 date constraint pk primary key (k1,k2 desc))";
         String ttl = "A.col1 = 'expired'";
         String tableName = generateUniqueName();
-        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        String ddl = String.format(ddlTemplate, tableName);
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
             String alterDDL = String.format("alter table %s set TTL = '%s'",
@@ -205,6 +205,89 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
             );
         } catch (Exception e) {
             fail("Unknown exception " + e);
+        }
+    }
+
+    @Test
+    public void testMultipleColumnFamilyNotAllowedOnAddColumn() throws SQLException {
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "A.col1 varchar, A.col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ttl = "A.col1 = 'expired'";
+        String tableName = generateUniqueName();
+        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(ddl);
+            // add a new column in a different column family
+            String alterDDL = String.format("alter table %s add col3 varchar", tableName);
+            try {
+                conn.createStatement().execute(alterDDL);
+                fail();
+            } catch (SQLException e) {
+                assertEquals(
+                        CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
+                        e.getErrorCode()
+                );
+            } catch (Exception e) {
+                fail("Unknown exception " + e);
+            }
+            alterDDL = String.format("alter table %s add A.col3 varchar", tableName);
+            conn.createStatement().execute(alterDDL);
+        }
+    }
+
+    @Test
+    public void testMultipleColumnFamilyNotAllowedOnAddColumn2() throws SQLException {
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'";
+        String ttl = "col1 = 'expired'";
+        String tableName = generateUniqueName();
+        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(ddl);
+            // add a new column in a different column family
+            String alterDDL = String.format("alter table %s add A.col3 varchar", tableName);
+            try {
+                conn.createStatement().execute(alterDDL);
+                fail();
+            } catch (SQLException e) {
+                assertEquals(
+                        CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
+                        e.getErrorCode()
+                );
+            } catch (Exception e) {
+                fail("Unknown exception " + e);
+            }
+            alterDDL = String.format("alter table %s add col3 varchar", tableName);
+            conn.createStatement().execute(alterDDL);
+        }
+    }
+
+    @Test
+    public void testMultipleColumnFamilyNotAllowedOnAddColumn3() throws SQLException {
+        String ddlTemplate = "create table %s (k1 bigint not null, k2 bigint not null," +
+                "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'," +
+                "DEFAULT_COLUMN_FAMILY='CF'";
+        String ttl = "col1 = 'expired' AND CF.col2 + 10 > CURRENT_DATE()";
+        String tableName = generateUniqueName();
+        String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(ddl);
+            assertConditonTTL(conn, tableName, ttl);
+            // add a new column in a different column family
+            String alterDDL = String.format("alter table %s add A.col3 varchar", tableName);
+            try {
+                conn.createStatement().execute(alterDDL);
+                fail();
+            } catch (SQLException e) {
+                assertEquals(
+                        CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES.getErrorCode(),
+                        e.getErrorCode()
+                );
+            } catch (Exception e) {
+                fail("Unknown exception " + e);
+            }
+            alterDDL = String.format("alter table %s add col3 varchar", tableName);
+            conn.createStatement().execute(alterDDL);
         }
     }
 
