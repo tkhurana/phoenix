@@ -171,11 +171,26 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
                 "col1 varchar, col2 date constraint pk primary key (k1,k2 desc)) TTL = '%s'," +
                 "DEFAULT_COLUMN_FAMILY='CF'";
         String ttl = "col1 = 'expired' AND CF.col2 + 10 > CURRENT_DATE()";
-        String tableName = generateUniqueName();
+        String tableName = "T_" + generateUniqueName();
         String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
             assertConditonTTL(conn, tableName, ttl);
+            // create view
+            String viewName = "GV_" + generateUniqueName();
+            ddl = String.format("create view %s (col3 varchar) as select * from %s where k1 = 2",
+                    viewName, tableName);
+            conn.createStatement().execute(ddl);
+            assertConditonTTL(conn, viewName, ttl);
+            // create global index
+            String indexName = "I_" + generateUniqueName();
+            ddl = String.format("create index %s on %s (col2) include(col1)",
+                    indexName, tableName);
+            conn.createStatement().execute(ddl);
+            assertConditonTTL(conn, indexName, ttl);
+            // create tenant view
+            //String tenantViewName = "TV_" + generateUniqueName();
+            //ddl = String.format()
         }
     }
 

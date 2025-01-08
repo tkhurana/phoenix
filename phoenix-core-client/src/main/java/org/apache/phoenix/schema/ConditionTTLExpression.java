@@ -70,8 +70,10 @@ import org.apache.phoenix.parse.TableName;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.schema.tuple.MultiKeyValueTuple;
 import org.apache.phoenix.schema.types.PBoolean;
+import org.apache.phoenix.thirdparty.com.google.common.collect.ListMultimap;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Sets;
+import org.apache.phoenix.util.ClientUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.ViewUtil;
@@ -81,8 +83,12 @@ import org.slf4j.LoggerFactory;
 public class ConditionTTLExpression extends TTLExpression {
     private static final Logger LOGGER = LoggerFactory.getLogger(ConditionTTLExpression.class);
 
+    // expression in literal form as stored in syscat
     private final String ttlExpr;
+    // compiled expression according to the table schema. For indexes the literal expression is
+    // first re-written to use index column references and then compiled.
     private Expression compiledExpr;
+    // columns referenced in the ttl expression to be added to scan
     private Set<ColumnReference> conditionExprColumns;
 
     public ConditionTTLExpression(String ttlExpr) {
@@ -223,6 +229,7 @@ public class ConditionTTLExpression extends TTLExpression {
     @Override
     public PTableProtos.TTLExpression toProto(PhoenixConnection connection,
                                               PTable table) throws SQLException, IOException {
+        // we want to compile the expression everytime we use it for masking
         Pair<Expression, Set<ColumnReference>> exprAndCols = buildExpression(connection, table);
         PTableProtos.TTLExpression.Builder ttl = PTableProtos.TTLExpression.newBuilder();
         PTableProtos.ConditionTTL.Builder condition = PTableProtos.ConditionTTL.newBuilder();
@@ -296,16 +303,12 @@ public class ConditionTTLExpression extends TTLExpression {
     }
 
     @Override
-    public Expression compileTTLExpression(PhoenixConnection connection,
-                                           PTable table) throws IOException {
-        try {
-            Pair<Expression, Set<ColumnReference>> expr = buildExpression(connection, table);
-            compiledExpr = expr.getFirst();
-            conditionExprColumns = expr.getSecond();
-            return compiledExpr;
-        } catch (SQLException e) {
-            throw new IOException(e);
-        }
+    public void compileTTLExpression(PhoenixConnection connection,
+                                     PTable table) throws SQLException {
+
+        Pair<Expression, Set<ColumnReference>> expr = buildExpression(connection, table);
+        compiledExpr = expr.getFirst();
+        conditionExprColumns = expr.getSecond();
     }
 
     private Pair<Expression, Set<ColumnReference>> buildExpression(PhoenixConnection connection,
@@ -360,7 +363,14 @@ public class ConditionTTLExpression extends TTLExpression {
         final PName tableName = PNameFactory.newName(tableNameNode.getTableName());
         PName fullName = SchemaUtil.getTableName(schemaName, tableName);
         final PName tenantId = conn.getTenantId();
-        String defaultFamily = (String) TableProperty.DEFAULT_COLUMN_FAMILY.getValue(tableProps);
+        PTableType tableType = createStmt.getTableType();
+        String defaultFamily;
+        if (parent != null) {
+            defaultFamily = parent.getDefaultFamilyName() == null ? null :
+                    parent.getDefaultFamilyName().getString();
+        } else {
+            defaultFamily = (String) TableProperty.DEFAULT_COLUMN_FAMILY.getValue(tableProps);
+        }
         List<PColumn> allCols = Lists.newArrayList();
         List<PColumn> pkCols = Lists.newArrayList();
         int pos = 0;
@@ -398,7 +408,7 @@ public class ConditionTTLExpression extends TTLExpression {
                 .setParentSchemaName((parent == null) ? null : parent.getSchemaName())
                 .setParentTableName((parent == null) ? null : parent.getTableName())
                 .setPhysicalNames(Collections.EMPTY_LIST)
-                .setType(createStmt.getTableType())
+                .setType(tableType)
                 .setImmutableStorageScheme(ONE_CELL_PER_COLUMN)
                 .setQualifierEncodingScheme(NON_ENCODED_QUALIFIERS)
                 .setDefaultFamilyName(PNameFactory.newName(defaultFamily))
