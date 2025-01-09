@@ -2344,9 +2344,10 @@ public class MetaDataClient {
      * @throws TableNotFoundException if not able ot find any table in hierarchy
      */
     private TTLExpression checkAndGetTTLFromHierarchy(PTable parent) throws SQLException {
-        return parent != null ? (parent.getType() == TABLE ? parent.getTTL()
-                : (parent.getType() == VIEW && parent.getViewType() != MAPPED ? getTTLFromViewHierarchy(parent) : TTL_EXPRESSION_NOT_DEFINED))
-                : TTL_EXPRESSION_NOT_DEFINED;
+        return parent != null ? (parent.getType() == TABLE ? parent.getTTL() :
+                (parent.getType() == VIEW && parent.getViewType() != MAPPED ?
+                        getTTLFromViewHierarchy(parent) : TTL_EXPRESSION_NOT_DEFINED)) :
+                TTL_EXPRESSION_NOT_DEFINED;
     }
 
     /**

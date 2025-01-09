@@ -80,6 +80,7 @@ import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
+import org.apache.phoenix.schema.ConditionTTLExpression;
 import org.apache.phoenix.schema.IllegalDataException;
 import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PName;
@@ -96,6 +97,7 @@ import org.apache.phoenix.thirdparty.com.google.common.annotations.VisibleForTes
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.CDCUtil;
+import org.apache.phoenix.util.ClientUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.MetaDataUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
@@ -356,7 +358,7 @@ public class CompactionScanner implements InternalScanner {
         }
     }
 
-    /*
+
     private void printRow(List<Cell> result, String title, boolean sort, boolean output) {
         List<Cell> row;
         if (sort) {
@@ -380,14 +382,13 @@ public class CompactionScanner implements InternalScanner {
             System.out.println(cell);
         }
     }
-     */
 
     @Override
     public boolean next(List<Cell> result) throws IOException {
         boolean hasMore = storeScanner.next(result);
         inputCellCount += result.size();
         if (!result.isEmpty()) {
-            //printRow(result, "Input for " + tableName + " " + columnFamilyName, true, false); // This is for debugging
+           //printRow(result, "Input for " + tableName + " " + columnFamilyName, true, false); // This is for debugging
             phoenixLevelRowCompactor.compact(result, false);
             outputCellCount += result.size();
             //printRow(result, "Output for " + tableName + " " + columnFamilyName, true, true); // This is for debugging
@@ -1027,9 +1028,7 @@ public class CompactionScanner implements InternalScanner {
                                         tableConnection =
                                         QueryUtil.getConnectionOnServer(tenantProps, configuration)) {
 
-                                    PTable
-                                            pTable =
-                                            PhoenixRuntime.getTableNoCache(
+                                    PTable pTable = PhoenixRuntime.getTableNoCache(
                                                     tableConnection, fullTableName);
                                     for (PTable index : pTable.getIndexes()) {
                                         // Handling the case when it is a table level index.
@@ -1045,6 +1044,12 @@ public class CompactionScanner implements InternalScanner {
                                             viewIndexIdBytes =
                                                     PLong.INSTANCE.toBytes(index.getViewIndexId());
                                         }
+                                        TTLExpression indexTTL = index.getTTL();
+                                        if (indexTTL instanceof ConditionTTLExpression) {
+                                            indexTTL.compileTTLExpression(
+                                                    tableConnection.unwrap(PhoenixConnection.class),
+                                                    index);
+                                        }
                                         tableTTLInfoList.add(
                                                 new TableTTLInfo(pTable.getPhysicalName().getBytes(),
                                                         tenantIdBytes, index.getTableName().getBytes(),
@@ -1053,6 +1058,16 @@ public class CompactionScanner implements InternalScanner {
 
                                 }
                             } else {
+                                if (viewTTL instanceof ConditionTTLExpression) {
+                                    try (Connection tableConnection =
+                                                 QueryUtil.getConnectionOnServer(tenantProps, configuration)) {
+                                        PTable pTable = PhoenixRuntime.getTableNoCache(
+                                                tableConnection, fullTableName);
+                                        viewTTL.compileTTLExpression(
+                                                tableConnection.unwrap(PhoenixConnection.class),
+                                                pTable);
+                                    }
+                                }
                                 tableTTLInfoList.add(
                                         new TableTTLInfo(physicalTableName.getBytes(),
                                                 tenantIdBytes, fullTableName.getBytes(),
@@ -1224,7 +1239,12 @@ public class CompactionScanner implements InternalScanner {
                 ttl = pTable.getTTL() != TTL_EXPRESSION_NOT_DEFINED ? pTable.getTTL() :
                         TTL_EXPRESSION_FORVER;
             }
-            ttl.compileTTLExpression(pConn, pTable);
+            try {
+                ttl.compileTTLExpression(pConn, pTable);
+            } catch (SQLException e) {
+                throw ClientUtil.createIOException(
+                        String.format("Error compiling ttl expression %s", ttl), e);
+            }
             LOGGER.info(String.format(
                     "NonPartitionedTableTTLTracker params:- " +
                             "(physical-name=%s, ttl=%s, isSystemTable=%s)",
@@ -1271,7 +1291,12 @@ public class CompactionScanner implements InternalScanner {
                                 isLongViewIndexEnabled, viewTTLTenantViewsPerScanLimit);
                 this.ttl = table.getTTL() != TTL_EXPRESSION_NOT_DEFINED ? table.getTTL() :
                         TTL_EXPRESSION_FORVER;
-                this.ttl.compileTTLExpression(pConn, table);
+                try {
+                    this.ttl.compileTTLExpression(pConn, table);
+                } catch (SQLException e) {
+                    throw ClientUtil.createIOException(
+                            String.format("Error compiling ttl expression %s", this.ttl), e);
+                }
                 this.isSharedIndex = isSharedIndex || localIndex;
                 this.isLongViewIndexEnabled = isLongViewIndexEnabled;
                 this.isSalted = isSalted;
