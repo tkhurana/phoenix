@@ -369,7 +369,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             return;
         }
         String ttlCol = "VAL5";
-        String ttlExpression = String.format("%s=TRUE OR %s is null", ttlCol, ttlCol);
+        String ttlExpression = String.format("%s=TRUE", ttlCol, ttlCol);
         createTable(ttlExpression);
         String tableName = schemaBuilder.getEntityTableName();
         injectEdge();
@@ -539,24 +539,29 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         }
     }
 
-    @Ignore
+    @Test
     public void testSCN() throws Exception {
-        String ttlCol = "VAL3";
-        String ttlExpression = String.format("CURRENT_DATE() >= %s + 1", ttlCol);
+        int ttl = 2000;
+        // equivalent to a ttl of 2s
+        String ttlExpression = String.format(
+                "TO_NUMBER(CURRENT_TIME()) - TO_NUMBER(PHOENIX_ROW_TIMESTAMP()) >= %d", ttl);
+        ttlExpression = String.format("%d", ttl/1000);
+        createTable(ttlExpression);
         createTable(ttlExpression);
         String tableName = schemaBuilder.getEntityTableName();
         injectEdge();
         int rowCount = 5;
-        long actual;
+        long actual = 0;
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             populateTable(conn, rowCount);
         }
-        injectEdge.incrementValue(1000);
+        injectEdge.incrementValue(ttl + rowCount + 1);
         Properties props = new Properties();
-        long scn = injectEdge.currentTime() - 500;
+        long scn = injectEdge.currentTime() - ttl;
         props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(scn));
         try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
             actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(0, actual);
         }
     }
 
