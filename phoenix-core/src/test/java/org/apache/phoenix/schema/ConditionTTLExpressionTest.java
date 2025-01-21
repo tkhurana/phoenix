@@ -511,6 +511,33 @@ public class ConditionTTLExpressionTest extends BaseConnectionlessQueryTest {
     }
 
     @Test
+    public void testUncoveredIndex() throws Exception {
+        String ddlTemplate = "create table %s (id varchar not null primary key, " +
+                "col1 integer, col2 integer, col3 double, col4 varchar) TTL = '%s'";
+        String tableName = generateUniqueName();
+        String indexTemplate = "create uncovered index %s on %s (col1) ";
+        String indexName = generateUniqueName();
+        String ttl = "col2 > 100 AND col4='expired'";
+        String query;
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String ddl = String.format(ddlTemplate, tableName, retainSingleQuotes(ttl));
+            conn.createStatement().execute(ddl);
+            assertConditonTTL(conn, tableName, ttl);
+            ddl = String.format(indexTemplate, indexName, tableName);
+            try {
+                conn.createStatement().execute(ddl);
+                fail("Should have thrown ColumnNotFoundException");
+            } catch (SQLException e) {
+                assertTrue(e.getCause() instanceof ColumnNotFoundException);
+            }
+            indexTemplate = "create uncovered index %s on %s (col4, col2) ";
+            ddl = String.format(indexTemplate, indexName, tableName);
+            conn.createStatement().execute(ddl);
+            assertConditonTTL(conn, indexName, ttl);
+        }
+    }
+
+    @Test
     public void testCreatingIndexWithMissingExprCols() throws Exception {
         String ddlTemplate = "create table %s (id varchar not null primary key, " +
                 "col1 integer, col2 integer, col3 double, col4 varchar) TTL = '%s'";
