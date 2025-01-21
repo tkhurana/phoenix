@@ -1003,7 +1003,7 @@ public class TestUtil {
                 Cell current = null;
                 while (cellScanner.advance()) {
                     current = cellScanner.current();
-                    cellCount.addCell(Bytes.toString(CellUtil.cloneRow(current)));
+                    cellCount.addOrUpdateCell(Bytes.toString(CellUtil.cloneRow(current)));
                 }
             }
         }
@@ -1013,15 +1013,19 @@ public class TestUtil {
     public static class CellCount {
         private Map<String, Integer> rowCountMap = new HashMap<String, Integer>();
 
-        public void addCell(String key) {
+        public void addOrUpdateCell(String key) {
+            addOrUpdateCells(key, 1);
+        }
+
+        public void addOrUpdateCells(String key, int count) {
             if (rowCountMap.containsKey(key)) {
-                rowCountMap.put(key, rowCountMap.get(key) + 1);
+                rowCountMap.put(key, rowCountMap.get(key) + count);
             } else {
-                rowCountMap.put(key, 1);
+                insertRow(key, count);
             }
         }
 
-        public void addRow(String key, int count) {
+        public void insertRow(String key, int count) {
             rowCountMap.put(key, count);
         }
 

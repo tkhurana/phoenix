@@ -17,7 +17,6 @@
  */
 package org.apache.phoenix.schema;
 
-import java.io.IOException;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
@@ -61,7 +60,12 @@ public class LiteralTTLExpression extends TTLExpression {
     }
 
     @Override
-    public long getTTLForRow(List<Cell> result) {
+    public long getRowTTLForMasking(List<Cell> result) {
+        return getRowTTLForCompaction(result);
+    }
+
+    @Override
+    public long getRowTTLForCompaction(List<Cell> result) {
         return ttlValue;
     }
 

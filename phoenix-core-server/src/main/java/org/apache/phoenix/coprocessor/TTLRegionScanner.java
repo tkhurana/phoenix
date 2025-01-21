@@ -34,8 +34,6 @@ import org.apache.hadoop.hbase.filter.PageFilter;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.ScannerContext;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.phoenix.query.QueryServices;
-import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.TTLExpression;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.ScanUtil;
@@ -108,7 +106,7 @@ public class TTLRegionScanner extends BaseRegionScanner {
     }
 
     private void setTTLContextForRow(List<Cell> result) {
-        ttl = ttlExpression.getTTLForRow(result);
+        ttl = ttlExpression.getRowTTLForMasking(result);
         ttlWindowStart = ttl == HConstants.FOREVER ? 1 : currentTime - ttl * 1000;
         ttl *= 1000;
     }

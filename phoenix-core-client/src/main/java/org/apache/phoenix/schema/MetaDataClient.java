@@ -29,6 +29,7 @@ import static org.apache.phoenix.query.QueryConstants.SPLITS_FILE;
 import static org.apache.phoenix.query.QueryConstants.SYSTEM_SCHEMA_NAME;
 import static org.apache.phoenix.query.QueryServices.INDEX_CREATE_DEFAULT_STATE;
 import static org.apache.phoenix.schema.PTableType.CDC;
+import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_FORVER;
 import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.thirdparty.com.google.common.collect.Sets.newLinkedHashSet;
 import static org.apache.phoenix.thirdparty.com.google.common.collect.Sets.newLinkedHashSetWithExpectedSize;
@@ -2340,10 +2341,14 @@ public class MetaDataClient {
      *      if it is defined
      * * For table it will just return TTL_NOT_DEFINED as it has no parent.
      * @param parent entity's parent
+     * @param entityName name of the entity
      * @return TTL from hierarchy if defined otherwise TTL_NOT_DEFINED.
      * @throws TableNotFoundException if not able ot find any table in hierarchy
      */
-    private TTLExpression checkAndGetTTLFromHierarchy(PTable parent) throws SQLException {
+    private TTLExpression checkAndGetTTLFromHierarchy(PTable parent, String entityName) throws SQLException {
+        if (CDCUtil.isCDCIndex(entityName)) {
+            return TTL_EXPRESSION_FORVER;
+        }
         return parent != null ? (parent.getType() == TABLE ? parent.getTTL() :
                 (parent.getType() == VIEW && parent.getViewType() != MAPPED ?
                         getTTLFromViewHierarchy(parent) : TTL_EXPRESSION_NOT_DEFINED)) :
@@ -2459,7 +2464,7 @@ public class MetaDataClient {
                         .build()
                         .buildException();
                 }
-                ttlFromHierarchy = checkAndGetTTLFromHierarchy(parent);
+                ttlFromHierarchy = checkAndGetTTLFromHierarchy(parent, tableName);
                 if (ttlFromHierarchy != TTL_EXPRESSION_NOT_DEFINED) {
                     throw new SQLExceptionInfo.Builder(SQLExceptionCode.
                             TTL_ALREADY_DEFINED_IN_HIERARCHY)
@@ -2480,7 +2485,7 @@ public class MetaDataClient {
                 }
                 ttl = ttlProp;
             } else {
-                ttlFromHierarchy = checkAndGetTTLFromHierarchy(parent);
+                ttlFromHierarchy = checkAndGetTTLFromHierarchy(parent, tableName);
                 if (ttlFromHierarchy != TTL_EXPRESSION_NOT_DEFINED) {
                     ttlFromHierarchy.validateTTLOnCreation(connection,
                             statement,
@@ -3737,9 +3742,7 @@ public class MetaDataClient {
                                 : statement.getWhereClause().toString())
                         .setMaxLookbackAge(maxLookbackAge)
                         .setCDCIncludeScopes(cdcIncludeScopes)
-                        .setTTL(result.getTable() != null ?
-                                result.getTable().getTTL() :
-                                ttl == null || ttl == TTL_EXPRESSION_NOT_DEFINED ? ttlFromHierarchy : ttl)
+                        .setTTL(ttl == null || ttl == TTL_EXPRESSION_NOT_DEFINED ? ttlFromHierarchy : ttl)
                         .setRowKeyMatcher(rowKeyMatcher)
                         .build();
                 result = new MetaDataMutationResult(code, result.getMutationTime(), table, true);
@@ -4548,7 +4551,8 @@ public class MetaDataClient {
                     TTLExpression ttlAlreadyDefined = TTL_EXPRESSION_NOT_DEFINED;
                     //Check up the hierarchy
                     if (table.getType() != PTableType.TABLE) {
-                        ttlAlreadyDefined = checkAndGetTTLFromHierarchy(PhoenixRuntime.getTableNoCache(connection, table.getParentName().toString()));
+                        ttlAlreadyDefined = checkAndGetTTLFromHierarchy(PhoenixRuntime.getTableNoCache(
+                                connection, table.getParentName().toString()), tableName);
                     }
                     if (ttlAlreadyDefined != TTL_EXPRESSION_NOT_DEFINED) {
                         throw new SQLExceptionInfo.Builder(SQLExceptionCode.

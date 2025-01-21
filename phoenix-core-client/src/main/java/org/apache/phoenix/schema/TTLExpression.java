@@ -89,7 +89,9 @@ public abstract class TTLExpression {
 
     abstract public String getTTLExpression();
 
-    abstract public long getTTLForRow(List<Cell> result);
+    abstract public long getRowTTLForMasking(List<Cell> result);
+
+    abstract public long getRowTTLForCompaction(List<Cell> result);
 
     abstract public String toString();
 
@@ -106,5 +108,4 @@ public abstract class TTLExpression {
 
     abstract public PTableProtos.TTLExpression toProto(PhoenixConnection connection,
                                                        PTable table) throws SQLException, IOException;
-
 }

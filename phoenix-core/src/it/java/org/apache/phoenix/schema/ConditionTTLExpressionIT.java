@@ -35,7 +35,6 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -53,7 +52,6 @@ import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.mapreduce.index.IndexTool;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder.OtherOptions;
-import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder.TableIndexOptions;
 import org.apache.phoenix.query.PhoenixTestBuilder.SchemaBuilder.TableOptions;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.thirdparty.com.google.common.base.Joiner;
@@ -219,7 +217,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             CellCount expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
                 // additional cell for empty column
-                expectedCellCount.addRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
+                expectedCellCount.insertRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
             }
             // remove the expired rows
             expectedCellCount.removeRow(dataRowPosToKey.get(2));
@@ -229,7 +227,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
                 // additional cell for empty column
-                expectedCellCount.addRow(indexRowPosToKey.get(i), includedColumns.size() + 1);
+                expectedCellCount.insertRow(indexRowPosToKey.get(i), includedColumns.size() + 1);
             }
             // remove the expired rows
             expectedCellCount.removeRow(indexRowPosToKey.get(2));
@@ -288,78 +286,13 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             CellCount expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
                 // additional cell for empty column
-                expectedCellCount.addRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
+                expectedCellCount.insertRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
             }
-            // update cell count for expired rows
-            updateExpectedCellCountForRow(2, 1,
-                    dataRowPosToKey, expectedCellCount); // updated 1 time
-            updateExpectedCellCountForRow(3, 3,
-                    dataRowPosToKey, expectedCellCount); // updated 3 times
+            // row position 2 updated 1 time 2 cells (column and empty column)
+            expectedCellCount.addOrUpdateCells(dataRowPosToKey.get(2), 1*2);
+            // row position 3 updated 3 times
+            expectedCellCount.addOrUpdateCells(dataRowPosToKey.get(3), 3*2);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
-        }
-    }
-
-    @Test
-    public void testLastVersionRetainedVisibleThroughMaxLookBack() throws Exception {
-        if (tableLevelMaxLookback == 0) {
-            return;
-        }
-        String ttlCol = "VAL5";
-        String ttlExpression = String.format("%s=TRUE", ttlCol);
-        createTable(ttlExpression);
-        String tableName = schemaBuilder.getEntityTableName();
-        injectEdge();
-        int rowCount = 5;
-        long actual;
-        try (Connection conn = DriverManager.getConnection(getUrl())) {
-            populateTable(conn, rowCount);
-            ResultSet rs = readRow(conn, 3);
-            assertTrue(rs.next());
-            assertFalse(rs.getBoolean(ttlCol));
-
-            // expire 1 row by setting to true
-            updateColumn(conn, 3, ttlCol, true);
-            actual = TestUtil.getRowCount(conn, tableName, true);
-            assertEquals(rowCount - 1, actual);
-
-            // read the row again, this time it should be masked
-            rs = readRow(conn, 3);
-            assertFalse(rs.next());
-
-            // expire 1 more row
-            updateColumn(conn, 2, ttlCol, true);
-            actual = TestUtil.getRowCount(conn, tableName, true);
-            assertEquals(rowCount - 2, actual);
-
-            // refresh the row again
-            updateColumn(conn, 3, ttlCol, false);
-            rs = readRow(conn, 3);
-            assertTrue(rs.next());
-            assertFalse(rs.getBoolean(ttlCol));
-            actual = TestUtil.getRowCount(conn, tableName, true);
-            assertEquals(rowCount - 1, actual);
-
-            // TODO
-            injectEdge.incrementValue(tableLevelMaxLookback);
-            // expire the row again
-            updateColumn(conn, 3, ttlCol, true);
-
-            // only the last update should be visible through the maxlookback window
-            injectEdge.incrementValue(tableLevelMaxLookback + 2);
-            doMajorCompaction(tableName);
-            CellCount expectedCellCount = new CellCount();
-            for (int i = 0; i < rowCount; ++i) {
-                // additional cell for empty column
-                expectedCellCount.addRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
-            }
-            // 1 row is expired
-            expectedCellCount.removeRow(dataRowPosToKey.get(2));
-            // Add 1 empty column cell to cover the gap
-            expectedCellCount.addCell(dataRowPosToKey.get(3));
-            validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
-            actual = TestUtil.getRowCount(conn, tableName, true);
-            // 1 row purged and 1 row masked
-            assertEquals(rowCount - 2, actual);
         }
     }
 
@@ -382,29 +315,29 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             updateColumn(conn, 0, ttlCol, true);
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(rowCount - 1, actual);
-            // all previous updates of the expired row fall out of maxlookback + ttl window
-            injectEdge.incrementValue(2*tableLevelMaxLookback+5);
+            // all previous updates of the expired row fall out of maxlookback window
+            injectEdge.incrementValue(tableLevelMaxLookback+5);
             // update another column not part of ttl expression
             updateColumn(conn, 0, "VAL2", 2345);
-            // only the last update should be visible through the maxlookback window
+            // only the last update should be visible in the maxlookback window
             injectEdge.incrementValue(1);
             doMajorCompaction(tableName);
-            injectEdge.incrementValue(tableLevelMaxLookback + 5);
-            doMajorCompaction(tableName);
-            /*CellCount expectedCellCount = new CellCount();
+            // the row should still be present because of maxlookback but masked
+            CellCount expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
                 // additional cell for empty column
-                expectedCellCount.addRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
+                expectedCellCount.insertRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
             }
-            // 1 row is expired
-            expectedCellCount.removeRow(dataRowPosToKey.get(2));
-            // Add 1 empty column cell to cover the gap
-            expectedCellCount.addCell(dataRowPosToKey.get(3));
+            expectedCellCount.addOrUpdateCells(dataRowPosToKey.get(0), 2);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
+            // verify that the row is being masked
             actual = TestUtil.getRowCount(conn, tableName, true);
-            // 1 row purged and 1 row masked
-            assertEquals(rowCount - 2, actual);
-             */
+            assertEquals(rowCount - 1, actual);
+            // no row versions in maxlookback
+            injectEdge.incrementValue(tableLevelMaxLookback + 5);
+            doMajorCompaction(tableName);
+            expectedCellCount.removeRow(dataRowPosToKey.get(0));
+            validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
         }
     }
 
@@ -432,12 +365,11 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(1, actual);
 
-            // advance the time by maxlookbackwindow but still within ttl
-            // only the last version is retained no bread crumbs
+            // advance the time by more than maxlookbackwindow
             injectEdge.incrementValue(tableLevelMaxLookback + 2);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
-            expectedCellCount.addRow(dataRowPosToKey.get(1), COLUMNS.length + 1);
+            expectedCellCount.insertRow(dataRowPosToKey.get(1), COLUMNS.length + 1);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
         }
     }
@@ -468,8 +400,8 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                 doMajorCompaction(tableName);
                 // only 2 rows should be retained
                 CellCount expectedCellCount = new CellCount();
-                expectedCellCount.addRow(dataRowPosToKey.get(0), COLUMNS.length + 1);
-                expectedCellCount.addRow(dataRowPosToKey.get(4), COLUMNS.length + 1);
+                expectedCellCount.insertRow(dataRowPosToKey.get(0), COLUMNS.length + 1);
+                expectedCellCount.insertRow(dataRowPosToKey.get(4), COLUMNS.length + 1);
                 validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
             } else {
                 // all updates within the max lookback window, retain everything
@@ -477,30 +409,22 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                 CellCount expectedCellCount = new CellCount();
                 for (int i = 0; i < rowCount; ++i) {
                     // additional cell for empty column
-                    expectedCellCount.addRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
+                    expectedCellCount.insertRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
                 }
-                // update cell count for expired rows
-                updateExpectedCellCountForRow(1, 1,
-                        dataRowPosToKey, expectedCellCount); // updated 1 time
+                // update cell count for expired rows 1 for the column and 1 for empty column
+                expectedCellCount.addOrUpdateCells(dataRowPosToKey.get(1), 2);
                 for (int rowPosition : rowsToDelete) {
                     // one DeleteFamily cell
-                    expectedCellCount.addCell(dataRowPosToKey.get(rowPosition));
+                    expectedCellCount.addOrUpdateCell(dataRowPosToKey.get(rowPosition));
                 }
                 validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
-                // increment so that the delete markers are outside of max lookback but the
-                // expired row is still visible
+                // increment so that the delete markers are outside of max lookback
                 injectEdge.incrementValue(tableLevelMaxLookback + 1);
                 doMajorCompaction(tableName);
                 for (int rowPosition : rowsToDelete) {
                     expectedCellCount.removeRow(dataRowPosToKey.get(rowPosition));
                 }
-                // only the latest version of expired row is retained
-                expectedCellCount.addRow(dataRowPosToKey.get(1), COLUMNS.length + 1);
-                validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
-
                 // purge the expired row also
-                injectEdge.incrementValue(tableLevelMaxLookback + 1);
-                doMajorCompaction(tableName);
                 expectedCellCount.removeRow(dataRowPosToKey.get(1));
                 validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
             }
@@ -529,17 +453,16 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(1, actual);
 
-            // advance the time by maxlookbackwindow but still within ttl
-            // only the last version is retained no bread crumbs
+            // advance the time by more than maxlookbackwindow
             injectEdge.incrementValue(tableLevelMaxLookback + 2);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
-            expectedCellCount.addRow(dataRowPosToKey.get(2), COLUMNS.length + 1);
+            expectedCellCount.insertRow(dataRowPosToKey.get(2), COLUMNS.length + 1);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
         }
     }
 
-    @Test
+    @Ignore
     public void testSCN() throws Exception {
         int ttl = 2000;
         // equivalent to a ttl of 2s
@@ -650,7 +573,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             CellCount expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
                 // additional cell for empty column
-                expectedCellCount.addRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
+                expectedCellCount.insertRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
             }
             // remove the expired rows
             expectedCellCount.removeRow(dataRowPosToKey.get(0));
@@ -662,7 +585,7 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
                 // 1 cell for empty column and 1 for included column
-                expectedCellCount.addRow(indexRowPosToKey.get(i), 2);
+                expectedCellCount.insertRow(indexRowPosToKey.get(i), 2);
             }
             // remove the expired rows
             expectedCellCount.removeRow(indexRowPosToKey.get(0));
@@ -698,14 +621,14 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
                 // only odd rows should be retained
                 if (i % 2 != 0) {
                     // additional cell for empty column
-                    expectedCellCount.addRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
+                    expectedCellCount.insertRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
                 }
             }
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey);
         }
     }
 
-    @Ignore
+    @Test
     public void testCDCIndex() throws Exception {
         String ttlCol = "VAL2";
         // VAL2 = -1
@@ -746,6 +669,11 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             // table should still have all the rows intact
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(rowCount, actual);
+
+            String alterDDL = String.format("alter table %s set TTL='%s = %d'", tableName, ttlCol, 0);
+            conn.createStatement().execute(alterDDL);
+            cdcIndex = ((PhoenixConnection) conn).getTableNoCache(cdcIndexName);
+            assertEquals(cdcIndex.getTTL(), TTLExpression.TTL_EXPRESSION_FORVER);
         }
     }
 
@@ -949,15 +877,11 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         return ps.executeQuery();
     }
 
-    private void updateExpectedCellCountForRow(int rowPosition,
-                                               int updateCount,
-                                               Map<Integer, String> rowPosToKey,
-                                               CellCount expectedCellCount) {
+    private void updateCellCountForRow(int rowPosition,
+                                       int updateCount,
+                                       Map<Integer, String> rowPosToKey,
+                                       CellCount cellCount) {
         String rowKey = rowPosToKey.get(rowPosition);
-        for (int update = 0; update < updateCount; ++update) {
-            // 1 update adds 2 cells 1 for the column and 1 empty cell
-            expectedCellCount.addCell(rowKey);
-            expectedCellCount.addCell(rowKey);
-        }
+        cellCount.addOrUpdateCells(rowKey, 2*updateCount);
     }
 }

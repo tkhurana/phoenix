@@ -383,15 +383,32 @@ public class CompactionScanner implements InternalScanner {
         }
     }
 
+    private void postProcessForConditionTTL(List<Cell> result) {
+        RowContext rowContext = phoenixLevelRowCompactor.rowContext;
+        for (Cell cell : result) {
+            if (cell.getTimestamp() >= rowContext.getMaxLookbackWindowStart()) {
+                return;
+            }
+        }
+        ConditionTTLExpression ttlExpr = (ConditionTTLExpression) rowContext.ttlExprForRow;
+        if (ttlExpr.isExpired(result)) {
+            result.clear();
+        }
+    }
+
     @Override
     public boolean next(List<Cell> result) throws IOException {
         boolean hasMore = storeScanner.next(result);
         inputCellCount += result.size();
         if (!result.isEmpty()) {
-           //printRow(result, "Input for " + tableName + " " + columnFamilyName, true, false); // This is for debugging
+           printRow(result, "Input for " + tableName + " " + columnFamilyName, true, false); // This is for debugging
             phoenixLevelRowCompactor.compact(result, false);
+            // do post-processing for condition TTL
+            if (phoenixLevelRowCompactor.rowContext.hasConditionTTL()) {
+                postProcessForConditionTTL(result);
+            }
             outputCellCount += result.size();
-            //printRow(result, "Output for " + tableName + " " + columnFamilyName, true, true); // This is for debugging
+            printRow(result, "Output for " + tableName + " " + columnFamilyName, true, true); // This is for debugging
         }
         return hasMore;
     }
@@ -1188,7 +1205,7 @@ public class CompactionScanner implements InternalScanner {
      */
     private interface TTLTracker {
         // get TTL for the row
-        long getTTL(List<Cell> result) throws IOException;
+        TTLExpression getTTLExpressionForRow(List<Cell> result) throws IOException;
 
         // get the default TTL
         TTLExpression getDefaultTTL();
@@ -1200,31 +1217,31 @@ public class CompactionScanner implements InternalScanner {
      */
     private class TableTTLTrackerForFlushesAndMinor implements TTLTracker {
 
-        private TTLExpression ttl;
+        private TTLExpression ttlExpr;
 
         public TableTTLTrackerForFlushesAndMinor(String tableName) {
 
-            ttl = TTL_EXPRESSION_FORVER;
+            ttlExpr = TTL_EXPRESSION_FORVER;
             LOGGER.info(String.format(
                     "TableTTLTrackerForFlushesAndMinor params:- " +
                             "(table-name=%s, ttl=%s)",
-                    tableName, ttl));
+                    tableName, ttlExpr));
         }
 
         @Override
-        public long getTTL(List<Cell> result) throws IOException {
-            return ttl.getTTLForRow(result);
+        public TTLExpression getTTLExpressionForRow(List<Cell> result) throws IOException {
+            return ttlExpr;
         }
 
         @Override
         public TTLExpression getDefaultTTL() {
-            return ttl;
+            return ttlExpr;
         }
     }
 
     private class NonPartitionedTableTTLTracker implements TTLTracker {
 
-        private TTLExpression ttl;
+        private TTLExpression ttlExpr;
 
         public NonPartitionedTableTTLTracker(
                 PhoenixConnection pConn,
@@ -1234,31 +1251,31 @@ public class CompactionScanner implements InternalScanner {
             boolean isSystemTable = pTable.getType() == PTableType.SYSTEM;
             if (isSystemTable) {
                 ColumnFamilyDescriptor cfd = store.getColumnFamilyDescriptor();
-                ttl = TTLExpression.create(cfd.getTimeToLive());
+                ttlExpr = TTLExpression.create(cfd.getTimeToLive());
             } else {
-                ttl = pTable.getTTL() != TTL_EXPRESSION_NOT_DEFINED ? pTable.getTTL() :
+                ttlExpr = pTable.getTTL() != TTL_EXPRESSION_NOT_DEFINED ? pTable.getTTL() :
                         TTL_EXPRESSION_FORVER;
             }
             try {
-                ttl.compileTTLExpression(pConn, pTable);
+                ttlExpr.compileTTLExpression(pConn, pTable);
             } catch (SQLException e) {
                 throw ClientUtil.createIOException(
-                        String.format("Error compiling ttl expression %s", ttl), e);
+                        String.format("Error compiling ttl expression %s", ttlExpr), e);
             }
             LOGGER.info(String.format(
                     "NonPartitionedTableTTLTracker params:- " +
                             "(physical-name=%s, ttl=%s, isSystemTable=%s)",
-                    pTable.getName().toString(), ttl.getTTLExpression(), isSystemTable));
+                    pTable.getName().toString(), ttlExpr, isSystemTable));
         }
 
         @Override
-        public long getTTL(List<Cell> result) throws IOException {
-            return ttl.getTTLForRow(result);
+        public TTLExpression getTTLExpressionForRow(List<Cell> result) throws IOException {
+            return ttlExpr;
         }
 
         @Override
         public TTLExpression getDefaultTTL() {
-            return ttl;
+            return ttlExpr;
         }
     }
 
@@ -1267,7 +1284,7 @@ public class CompactionScanner implements InternalScanner {
                 PartitionedTableTTLTracker.class);
 
         // Default or Table-Level TTL
-        private TTLExpression ttl;
+        private TTLExpression ttlExpr;
         private boolean isSharedIndex = false;
         private boolean isMultiTenant = false;
         private boolean isSalted = false;
@@ -1289,13 +1306,13 @@ public class CompactionScanner implements InternalScanner {
                 this.tableRowKeyMatcher =
                         new PartitionedTableRowKeyMatcher(table, isSalted, isSharedIndex,
                                 isLongViewIndexEnabled, viewTTLTenantViewsPerScanLimit);
-                this.ttl = table.getTTL() != TTL_EXPRESSION_NOT_DEFINED ? table.getTTL() :
+                this.ttlExpr = table.getTTL() != TTL_EXPRESSION_NOT_DEFINED ? table.getTTL() :
                         TTL_EXPRESSION_FORVER;
                 try {
-                    this.ttl.compileTTLExpression(pConn, table);
+                    this.ttlExpr.compileTTLExpression(pConn, table);
                 } catch (SQLException e) {
                     throw ClientUtil.createIOException(
-                            String.format("Error compiling ttl expression %s", this.ttl), e);
+                            String.format("Error compiling ttl expression %s", this.ttlExpr), e);
                 }
                 this.isSharedIndex = isSharedIndex || localIndex;
                 this.isLongViewIndexEnabled = isLongViewIndexEnabled;
@@ -1310,7 +1327,7 @@ public class CompactionScanner implements InternalScanner {
                                 "default-ttl = %s, startingPKPosition = %d",
                         region.getRegionInfo().getEncodedName(),
                         region.getRegionInfo().getTable().getNameAsString(), this.isMultiTenant,
-                        this.isSharedIndex, this.isSalted, this.ttl, this.startingPKPosition));
+                        this.isSharedIndex, this.isSalted, this.ttlExpr, this.startingPKPosition));
 
             } catch (SQLException e) {
                 LOGGER.error(String.format("Failed to read from catalog: " + e.getMessage()));
@@ -1385,12 +1402,12 @@ public class CompactionScanner implements InternalScanner {
         }
 
         @Override
-        public long getTTL(List<Cell> result) throws IOException {
+        public TTLExpression getTTLExpressionForRow(List<Cell> result) throws IOException {
             boolean matched = false;
             TableTTLInfo tableTTLInfo = null;
             List<Integer> pkPositions = null;
-            long defaultTTLInSecs = ttl.getTTLForRow(result);
-            long rowTTLInSecs = defaultTTLInSecs;
+            TTLExpression defaultTTLExpr = ttlExpr;
+            TTLExpression rowTTLExpr = defaultTTLExpr;
             long matchedOffset = -1;
             int pkPosition = startingPKPosition;
             MatcherType matchedType = null;
@@ -1447,11 +1464,11 @@ public class CompactionScanner implements InternalScanner {
                 matched = tableTTLInfo != null;
                 matchedOffset = matched ? offset : -1;
                 if (matched) {
-                    rowTTLInSecs = tableTTLInfo.getTTL().getTTLForRow(result);
+                    rowTTLExpr = tableTTLInfo.getTTL();
                 } else {
-                    rowTTLInSecs = defaultTTLInSecs; /* in secs */
+                    rowTTLExpr = defaultTTLExpr; /* in secs */
                 }
-                return rowTTLInSecs;
+                return rowTTLExpr;
             } catch (SQLException e) {
                 LOGGER.error(String.format("Exception when visiting table: " + e.getMessage()));
                 throw new IOException(e);
@@ -1460,7 +1477,7 @@ public class CompactionScanner implements InternalScanner {
                     LOGGER.trace(String.format("visiting row-key = %s, region = %s, " +
                                     "table-ttl-info=%s, " +
                                     "matched = %s, matched-type = %s, match-pattern = %s, " +
-                                    "ttl = %d, matched-offset = %d, " +
+                                    "ttlExpr = %s, matched-offset = %d, " +
                                     "pk-pos = %d, pk-pos-list = %s",
                             CellUtil.getCellKeyAsString(firstCell),
                             CompactionScanner.this.store.getRegionInfo().getEncodedName(),
@@ -1468,7 +1485,7 @@ public class CompactionScanner implements InternalScanner {
                             matched,
                             matchedType,
                             matched ? Bytes.toStringBinary(tableTTLInfo.getMatchPattern()) : "NULL",
-                            rowTTLInSecs,
+                            rowTTLExpr,
                             matchedOffset,
                             pkPosition,
                             pkPositions != null ? pkPositions.stream()
@@ -1480,7 +1497,7 @@ public class CompactionScanner implements InternalScanner {
 
         @Override
         public TTLExpression getDefaultTTL() {
-            return ttl;
+            return ttlExpr;
         }
     }
 
@@ -1732,6 +1749,7 @@ public class CompactionScanner implements InternalScanner {
         long maxTimestamp;
         long minTimestamp;
         long ttl;
+        TTLExpression ttlExprForRow;
         long ttlWindowStart;
         long maxLookbackWindowStartForRow;
 
@@ -1742,7 +1760,7 @@ public class CompactionScanner implements InternalScanner {
             version = 0;
         }
 
-        public void setTTL(long ttlInSecs) {
+        private void setTTL(long ttlInSecs) {
             this.ttl = Math.max(ttlInSecs*1000, maxLookbackInMillis + 1);
             this.ttlWindowStart = ttlInSecs == HConstants.FOREVER ? 1 : compactionTime - ttl ;
             this.maxLookbackWindowStartForRow = Math.max(ttlWindowStart, maxLookbackWindowStart);
@@ -1751,6 +1769,16 @@ public class CompactionScanner implements InternalScanner {
                         ttlWindowStart, maxLookbackWindowStart));
             }
         }
+
+        public void setTTL(TTLExpression ttlExpr, List<Cell> result) {
+            ttlExprForRow = ttlExpr;
+            setTTL(ttlExprForRow.getRowTTLForCompaction(result));
+        }
+
+        public boolean hasConditionTTL() {
+            return ttlExprForRow != null && ttlExprForRow instanceof ConditionTTLExpression;
+        }
+
         public long getTTL() {
             return ttl;
         }
@@ -2089,7 +2117,8 @@ public class CompactionScanner implements InternalScanner {
         private void formCompactionRowVersions(LinkedList<LinkedList<Cell>> columns,
                 List<Cell> result) throws IOException {
             rowContext.init();
-            rowContext.setTTL(rowTracker.getTTL(result));
+            TTLExpression ttlExprForRow = rowTracker.getTTLExpressionForRow(result);
+            rowContext.setTTL(ttlExprForRow, result);
             while (!columns.isEmpty()) {
                 formNextCompactionRowVersion(columns, rowContext, result);
                 // Remove the columns that are empty
@@ -2484,7 +2513,8 @@ public class CompactionScanner implements InternalScanner {
                 return;
             }
             phoenixResult.clear();
-            rowContext.setTTL(rowTracker.getTTL(result));
+            TTLExpression ttlExprForRow = rowTracker.getTTLExpressionForRow(result);
+            rowContext.setTTL(ttlExprForRow, result);
             // For multi-CF case, always do region level scan for empty CF store during major compaction else
             // we could end-up removing some empty cells which are needed to close the gap b/w empty CF cell and
             // non-empty CF cell to prevent partial row expiry. This can happen when last row version of non-empty

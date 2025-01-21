@@ -20,6 +20,7 @@ package org.apache.phoenix.schema;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.DEFAULT_TTL;
 import static org.apache.phoenix.schema.PTable.ImmutableStorageScheme.ONE_CELL_PER_COLUMN;
 import static org.apache.phoenix.schema.PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS;
+import static org.apache.phoenix.schema.PTableType.CDC;
 import static org.apache.phoenix.schema.PTableType.VIEW;
 import static org.apache.phoenix.util.SchemaUtil.isPKColumn;
 
@@ -47,7 +48,6 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.io.WritableUtils;
 import org.apache.phoenix.compile.ColumnResolver;
-import org.apache.phoenix.compile.ExpressionCompiler;
 import org.apache.phoenix.compile.FromCompiler;
 import org.apache.phoenix.compile.IndexStatementRewriter;
 import org.apache.phoenix.compile.StatementContext;
@@ -70,10 +70,9 @@ import org.apache.phoenix.parse.TableName;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.schema.tuple.MultiKeyValueTuple;
 import org.apache.phoenix.schema.types.PBoolean;
-import org.apache.phoenix.thirdparty.com.google.common.collect.ListMultimap;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Sets;
-import org.apache.phoenix.util.ClientUtil;
+import org.apache.phoenix.util.CDCUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.ViewUtil;
@@ -170,7 +169,7 @@ public class ConditionTTLExpression extends TTLExpression {
      * @return DEFAULT_TTL (FOREVER) if the expression evaluates to False else 0
      * if the expression evaluates to true i.e. row is expired
      */
-    public long getTTLForRow(List<Cell> result) {
+    public long getRowTTLForMasking(List<Cell> result) {
         long ttl = DEFAULT_TTL;
         if (compiledExpr == null) {
             throw new RuntimeException(
@@ -189,6 +188,15 @@ public class ConditionTTLExpression extends TTLExpression {
             LOGGER.info("Expression evaluation failed for expr {}", ttlExpr);
         }
         return ttl;
+    }
+
+    @Override
+    public long getRowTTLForCompaction(List<Cell> result) {
+        return DEFAULT_TTL;
+    }
+
+    public boolean isExpired(List<Cell> result) {
+        return getRowTTLForMasking(result) == 0;
     }
 
     private static byte[] serializeExpression(Expression condTTLExpr) throws IOException {
@@ -290,9 +298,13 @@ public class ConditionTTLExpression extends TTLExpression {
     public void validateTTLOnAlter(PhoenixConnection conn,
                                    PTable table) throws SQLException {
         validateTTLExpression(conn, table, null);
-        // verify that the expression is covered by all the existing indexes
         for (PTable index : table.getIndexes()) {
             try {
+                if (CDCUtil.isCDCIndex(index)) {
+                    // CDC index doesn't inherit ConditionTTL expression
+                    continue;
+                }
+                // verify that the expression is covered by all the existing indexes
                 buildExpression(conn, index, table);
             } catch (ColumnNotFoundException | ColumnFamilyNotFoundException e) {
                 throw new SQLException(String.format(
@@ -306,9 +318,9 @@ public class ConditionTTLExpression extends TTLExpression {
     public void compileTTLExpression(PhoenixConnection connection,
                                      PTable table) throws SQLException {
 
-        Pair<Expression, Set<ColumnReference>> expr = buildExpression(connection, table);
-        compiledExpr = expr.getFirst();
-        conditionExprColumns = expr.getSecond();
+        Pair<Expression, Set<ColumnReference>> exprAndCols = buildExpression(connection, table);
+        compiledExpr = exprAndCols.getFirst();
+        conditionExprColumns = exprAndCols.getSecond();
     }
 
     private Pair<Expression, Set<ColumnReference>> buildExpression(PhoenixConnection connection,
@@ -320,6 +332,11 @@ public class ConditionTTLExpression extends TTLExpression {
                 new PhoenixStatement(connection), resolver);
         WhereExpressionCompiler expressionCompiler = new WhereExpressionCompiler(context);
         Expression expr = ttlCondition.accept(expressionCompiler);
+        if (expressionCompiler.isAggregate()) {
+            throw new SQLExceptionInfo.Builder(
+                    SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_CONDITION_TTL)
+                    .build().buildException();
+        }
         Set<ColumnReference> exprCols =
                 Sets.newHashSetWithExpectedSize(context.getWhereConditionColumns().size());
         for (Pair<byte[], byte[]> column : context.getWhereConditionColumns()) {
@@ -430,22 +447,17 @@ public class ConditionTTLExpression extends TTLExpression {
                                        PTable table,
                                        PTable parent) throws SQLException {
 
+        if (table.getType() == CDC) {  // no need to validate for CDC type tables
+            return;
+        }
         if (table.getColumnFamilies().size() > 1) {
             throw new SQLExceptionInfo.Builder(
                 SQLExceptionCode.CANNOT_SET_CONDITION_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES)
                 .build().buildException();
         }
-        ParseNode ttlCondition = parseExpression(conn, table, parent);
-        ColumnResolver resolver = FromCompiler.getResolver(new TableRef(table));
-        StatementContext context = new StatementContext(new PhoenixStatement(conn), resolver);
-        ExpressionCompiler expressionCompiler = new ExpressionCompiler(context);
         try {
-            Expression ttlExpression = ttlCondition.accept(expressionCompiler);
-            if (expressionCompiler.isAggregate()) {
-                throw new SQLExceptionInfo.Builder(
-                        SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_CONDITION_TTL)
-                        .build().buildException();
-            }
+            Pair<Expression, Set<ColumnReference>> exprAndCols = buildExpression(conn, table, parent);
+            Expression ttlExpression = exprAndCols.getFirst();
             if (ttlExpression.getDataType() != PBoolean.INSTANCE) {
                 throw TypeMismatchException.newException(PBoolean.INSTANCE,
                         ttlExpression.getDataType(), ttlExpression.toString());
