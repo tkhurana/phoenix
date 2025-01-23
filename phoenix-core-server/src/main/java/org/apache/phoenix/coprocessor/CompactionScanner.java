@@ -401,14 +401,14 @@ public class CompactionScanner implements InternalScanner {
         boolean hasMore = storeScanner.next(result);
         inputCellCount += result.size();
         if (!result.isEmpty()) {
-           printRow(result, "Input for " + tableName + " " + columnFamilyName, true, false); // This is for debugging
+           //printRow(result, "Input for " + tableName + " " + columnFamilyName, true, false); // This is for debugging
             phoenixLevelRowCompactor.compact(result, false);
             // do post-processing for condition TTL
             if (phoenixLevelRowCompactor.rowContext.hasConditionTTL()) {
                 postProcessForConditionTTL(result);
             }
             outputCellCount += result.size();
-            printRow(result, "Output for " + tableName + " " + columnFamilyName, true, true); // This is for debugging
+            //printRow(result, "Output for " + tableName + " " + columnFamilyName, true, true); // This is for debugging
         }
         return hasMore;
     }

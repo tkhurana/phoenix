@@ -17,10 +17,12 @@
  */
 package org.apache.phoenix.schema;
 
+import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_BEYOND_MAXLOOKBACK_MISSING_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_EXPIRED_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_MISSING_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_VALID_INDEX_ROW_COUNT;
+import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.REBUILT_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.SCANNED_DATA_ROW_COUNT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -506,10 +508,11 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         }
     }
 
-    @Ignore
+    @Test
     public void testIndexTool() throws Exception {
         String ttlCol = "VAL5";
         String ttlExpression = String.format("%s=TRUE", ttlCol);
+        //String ttlExpression = "100";
         createTable(ttlExpression);
         String fullDataTableName = schemaBuilder.getEntityTableName();
         String schemaName = SchemaUtil.getSchemaNameFromFullName(fullDataTableName);
@@ -519,20 +522,42 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
         long actual;
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             populateTable(conn, rowCount);
-            injectEdge.incrementValue(10);
             deleteRow(conn, 2);
-            injectEdge.incrementValue(10);
             // expire some rows
             updateColumn(conn, 0, ttlCol, true);
             updateColumn(conn, 4, ttlCol, true);
-            injectEdge.incrementValue(10);
             // now create the index async
             String indexName = generateUniqueName();
             String fullIndexName = SchemaUtil.getTableName(schemaName, indexName);
             String indexDDL = String.format("create index %s on %s (%s) include (%s) async",
                     indexName, fullDataTableName, "VAL1", ttlCol);
             conn.createStatement().execute(indexDDL);
-            IndexToolIT.runIndexTool(false, schemaName, tableName, indexName);
+            IndexTool it = IndexToolIT.runIndexTool(false, schemaName, tableName, indexName,
+                    null, 0, IndexTool.IndexVerifyType.BEFORE);
+            CounterGroup mrJobCounters = IndexToolIT.getMRJobCounters(it);
+            try {
+                assertEquals(rowCount - 2, // only the expired rows are masked but not deleted rows
+                        mrJobCounters.findCounter(SCANNED_DATA_ROW_COUNT.name()).getValue());
+                assertEquals(rowCount - 2,
+                        mrJobCounters.findCounter(REBUILT_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(
+                                BEFORE_REBUILD_VALID_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(
+                                BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(
+                                BEFORE_REBUILD_EXPIRED_INDEX_ROW_COUNT.name()).getValue());
+                String missingIndexRowCounter = tableLevelMaxLookback != 0 ?
+                        BEFORE_REBUILD_MISSING_INDEX_ROW_COUNT.name() :
+                        BEFORE_REBUILD_BEYOND_MAXLOOKBACK_MISSING_INDEX_ROW_COUNT.name();
+                assertEquals(rowCount - 2,
+                            mrJobCounters.findCounter(missingIndexRowCounter).getValue());
+            } catch (AssertionError e) {
+                IndexToolIT.dumpMRJobCounters(mrJobCounters);
+                throw e;
+            }
             populateRowPosToRowKey(conn, true);
 
             // Both the tables should have the same row count from Phoenix
@@ -541,31 +566,6 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             actual = TestUtil.getRowCountFromIndex(conn, fullDataTableName, fullIndexName);
             assertEquals(rowCount -(2+1), actual);
 
-            // raw row count should include masked rows
-            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullDataTableName));
-            assertEquals(rowCount, actual);
-            actual = TestUtil.getRawRowCount(conn, TableName.valueOf(fullIndexName));
-            assertEquals(rowCount, actual);
-
-            // run index verification
-            IndexTool it = IndexToolIT.runIndexTool(false, schemaName, tableName, indexName,
-                    null, 0, IndexTool.IndexVerifyType.ONLY);
-            CounterGroup mrJobCounters = IndexToolIT.getMRJobCounters(it);
-            try {
-                assertEquals(rowCount,
-                        mrJobCounters.findCounter(SCANNED_DATA_ROW_COUNT.name()).getValue());
-                assertEquals(rowCount,
-                        mrJobCounters.findCounter(BEFORE_REBUILD_VALID_INDEX_ROW_COUNT.name()).getValue());
-                assertEquals(0,
-                        mrJobCounters.findCounter(BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT.name()).getValue());
-                assertEquals(0,
-                        mrJobCounters.findCounter(BEFORE_REBUILD_EXPIRED_INDEX_ROW_COUNT.name()).getValue());
-                assertEquals(0,
-                        mrJobCounters.findCounter(BEFORE_REBUILD_MISSING_INDEX_ROW_COUNT.name()).getValue());
-            } catch (AssertionError e) {
-                IndexToolIT.dumpMRJobCounters(mrJobCounters);
-                throw e;
-            }
             injectEdge.incrementValue(2*tableLevelMaxLookback + 5);
             doMajorCompaction(fullDataTableName);
             doMajorCompaction(fullIndexName);
@@ -593,6 +593,32 @@ public class ConditionTTLExpressionIT extends ParallelStatsDisabledIT {
             // remove the deleted row
             expectedCellCount.removeRow(indexRowPosToKey.get(2));
             validateTable(conn, fullIndexName, expectedCellCount, indexRowPosToKey);
+
+            // run index verification
+            it = IndexToolIT.runIndexTool(false, schemaName, tableName, indexName,
+                    null, 0, IndexTool.IndexVerifyType.ONLY);
+            mrJobCounters = IndexToolIT.getMRJobCounters(it);
+            try {
+                assertEquals(rowCount -(2+1), // deleted rows and expired rows should be purged
+                        mrJobCounters.findCounter(SCANNED_DATA_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(REBUILT_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(rowCount - (2+1),
+                        mrJobCounters.findCounter(
+                                BEFORE_REBUILD_VALID_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(
+                                BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(
+                                BEFORE_REBUILD_EXPIRED_INDEX_ROW_COUNT.name()).getValue());
+                assertEquals(0,
+                        mrJobCounters.findCounter(
+                                BEFORE_REBUILD_MISSING_INDEX_ROW_COUNT.name()).getValue());
+            } catch (AssertionError e) {
+                IndexToolIT.dumpMRJobCounters(mrJobCounters);
+                throw e;
+            }
         }
     }
 
