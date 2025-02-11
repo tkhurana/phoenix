@@ -1476,6 +1476,10 @@ public class ScanUtil {
     public static void addConditionalTTLColumnsToScan(Scan scan,
                                                       PhoenixConnection connection,
                                                       PTable table) throws SQLException {
+        if (!table.hasConditionalTTL()) {
+            return;
+        }
+
         //If entity is a view and phoenix.view.ttl.enabled is false then don't
         // set TTL scan attribute.
         if ((table.getType() == PTableType.VIEW) &&
@@ -1487,10 +1491,6 @@ public class ScanUtil {
 
         // If Phoenix level TTL is not enabled OR is a system table then return.
         if (!isPhoenixTableTTLEnabled(connection.getQueryServices().getConfiguration())) {
-            return;
-        }
-
-        if (!table.hasConditionalTTL()) {
             return;
         }
 
