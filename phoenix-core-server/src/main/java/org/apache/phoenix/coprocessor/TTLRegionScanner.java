@@ -35,6 +35,7 @@ import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.ScannerContext;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.schema.TTLExpression;
+import org.apache.phoenix.schema.TTLExpressionFactory;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.ScanUtil;
 import org.slf4j.Logger;
@@ -44,7 +45,7 @@ import static org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverCons
 import static org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants.EMPTY_COLUMN_QUALIFIER_NAME;
 import static org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants.IS_PHOENIX_TTL_SCAN_TABLE_SYSTEM;
 import static org.apache.phoenix.coprocessor.BaseScannerRegionObserver.isPhoenixTableTTLEnabled;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_FOREVER;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
 
 /**
  *  TTLRegionScanner masks expired rows using the empty column cell timestamp
@@ -83,7 +84,7 @@ public class TTLRegionScanner extends BaseRegionScanner {
         } else {
             ColumnFamilyDescriptor cfd =
                     env.getRegion().getTableDescriptor().getColumnFamilies()[0];
-            ttlExpression = TTLExpression.create(cfd.getTimeToLive());
+            ttlExpression = TTLExpressionFactory.create(cfd.getTimeToLive());
         }
         // Regardless if the Phoenix Table TTL feature is disabled cluster wide or the client is
         // an older client and does not supply the empty column parameters, the masking should not

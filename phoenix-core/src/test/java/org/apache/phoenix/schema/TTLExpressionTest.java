@@ -17,6 +17,8 @@
  */
 package org.apache.phoenix.schema;
 
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 
@@ -46,37 +48,37 @@ public class TTLExpressionTest {
     public void testLiteralExpression() {
         int ttl = 100;
         LiteralTTLExpression literal = new LiteralTTLExpression(ttl);
-        assertEquals(literal, TTLExpression.create(ttl));
-        assertEquals(literal, TTLExpression.create(String.valueOf(ttl)));
+        assertEquals(literal, TTLExpressionFactory.create(ttl));
+        assertEquals(literal, TTLExpressionFactory.create(String.valueOf(ttl)));
     }
 
     @Test
     public void testForever() {
-        assertEquals(TTLExpression.TTL_EXPRESSION_FOREVER,
-                TTLExpression.create(PhoenixDatabaseMetaData.FOREVER_TTL));
-        assertEquals(TTLExpression.TTL_EXPRESSION_FOREVER,
-                TTLExpression.create(HConstants.FOREVER));
+        assertEquals(TTL_EXPRESSION_FOREVER,
+                TTLExpressionFactory.create(PhoenixDatabaseMetaData.FOREVER_TTL));
+        assertEquals(TTL_EXPRESSION_FOREVER,
+                TTLExpressionFactory.create(HConstants.FOREVER));
     }
 
     @Test
     public void testNone() throws SQLException {
-        assertEquals(TTLExpression.TTL_EXPRESSION_NOT_DEFINED,
-                TTLExpression.create(PhoenixDatabaseMetaData.NONE_TTL));
-        assertEquals(TTLExpression.TTL_EXPRESSION_NOT_DEFINED,
-                TTLExpression.create(PhoenixDatabaseMetaData.TTL_NOT_DEFINED));
-        assertNull(TTLExpression.TTL_EXPRESSION_NOT_DEFINED.getTTLForScanAttribute(pconn, table));
+        assertEquals(TTL_EXPRESSION_NOT_DEFINED,
+                TTLExpressionFactory.create(PhoenixDatabaseMetaData.NONE_TTL));
+        assertEquals(TTL_EXPRESSION_NOT_DEFINED,
+                TTLExpressionFactory.create(PhoenixDatabaseMetaData.TTL_NOT_DEFINED));
+        assertNull(TTL_EXPRESSION_NOT_DEFINED.getTTLForScanAttribute(pconn, table));
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testInvalidLiteral() {
-        TTLExpression.create(-1);
+        TTLExpressionFactory.create(-1);
     }
 
     @Test
     public void testConditionalExpression() throws SQLException {
         String ttl = "PK1 = 5 AND COL1 > 'abc'";
         ConditionalTTLExpression expected = new ConditionalTTLExpression(ttl);
-        TTLExpression actual = TTLExpression.create(ttl);
+        TTLExpression actual = TTLExpressionFactory.create(ttl);
         assertEquals(expected, actual);
         assertEquals(ttl, expected.getTTLExpression());
     }

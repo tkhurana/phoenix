@@ -23,14 +23,21 @@ import java.util.Map;
 import java.util.Objects;
 
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.phoenix.compile.StatementContext;
 import org.apache.phoenix.coprocessor.generated.PTableProtos;
 import org.apache.phoenix.jdbc.PhoenixConnection;
+import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.parse.CreateTableStatement;
 import org.apache.phoenix.thirdparty.com.google.common.base.Preconditions;
 
-public class LiteralTTLExpression extends TTLExpression {
+public class LiteralTTLExpression implements TTLExpression {
     private final int ttlValue;
+
+    public static final LiteralTTLExpression TTL_EXPRESSION_FOREVER =
+            new LiteralTTLExpression(HConstants.FOREVER);
+    public static final LiteralTTLExpression TTL_EXPRESSION_NOT_DEFINED =
+            new LiteralTTLExpression(PhoenixDatabaseMetaData.TTL_NOT_DEFINED);
 
     public LiteralTTLExpression(int ttl) {
         Preconditions.checkArgument(ttl >= 0);
@@ -97,7 +104,7 @@ public class LiteralTTLExpression extends TTLExpression {
     @Override
     public PTableProtos.TTLExpression toProto(PhoenixConnection connection,
                                               PTable table) throws SQLException {
-        if (this.equals(TTLExpression.TTL_EXPRESSION_NOT_DEFINED)) {
+        if (this.equals(TTL_EXPRESSION_NOT_DEFINED)) {
             return null;
         }
         PTableProtos.TTLExpression.Builder ttl = PTableProtos.TTLExpression.newBuilder();

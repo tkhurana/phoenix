@@ -26,8 +26,8 @@ import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CHILD_LINK_
 import static org.apache.phoenix.query.QueryConstants.LOCAL_INDEX_COLUMN_FAMILY_PREFIX;
 import static org.apache.phoenix.query.QueryServices.PHOENIX_VIEW_TTL_TENANT_VIEWS_PER_SCAN_LIMIT;
 import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_PHOENIX_VIEW_TTL_TENANT_VIEWS_PER_SCAN_LIMIT;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_FOREVER;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.util.ByteUtil.EMPTY_BYTE_ARRAY;
 
 import java.io.IOException;
@@ -90,6 +90,7 @@ import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.RowKeyValueAccessor;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.TTLExpression;
+import org.apache.phoenix.schema.TTLExpressionFactory;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.schema.types.PLong;
 import org.apache.phoenix.schema.types.PSmallint;
@@ -1046,7 +1047,7 @@ public class CompactionScanner implements InternalScanner {
                             String viewTTLStr = viewTTLRS.getString("TTL");
                             TTLExpression viewTTL = viewTTLStr == null || viewTTLStr.isEmpty()
                                     ? TTL_EXPRESSION_NOT_DEFINED
-                                    : TTLExpression.create(viewTTLStr);
+                                    : TTLExpressionFactory.create(viewTTLStr);
                             byte[] rowKeyMatcher = viewTTLRS.getBytes("ROW_KEY_MATCHER");
                             byte[]
                                     tenantIdBytes =
@@ -1267,7 +1268,7 @@ public class CompactionScanner implements InternalScanner {
             try {
                 if (isSystemTable) {
                     ColumnFamilyDescriptor cfd = store.getColumnFamilyDescriptor();
-                    ttlExpr = TTLExpression.create(cfd.getTimeToLive());
+                    ttlExpr = TTLExpressionFactory.create(cfd.getTimeToLive());
                 } else {
                     ttlExpr = !pTable.getTTLExpression().equals(TTL_EXPRESSION_NOT_DEFINED)
                             ? pTable.getCompiledTTLExpression(pConn) : TTL_EXPRESSION_FOREVER;

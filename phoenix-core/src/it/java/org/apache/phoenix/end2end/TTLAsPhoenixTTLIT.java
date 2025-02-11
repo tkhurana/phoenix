@@ -30,6 +30,7 @@ import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTableKey;
 import org.apache.phoenix.schema.TTLExpression;
+import org.apache.phoenix.schema.TTLExpressionFactory;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.junit.Test;
@@ -48,7 +49,8 @@ import java.util.Properties;
 import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_SET_OR_ALTER_PROPERTY_FOR_INDEX;
 import static org.apache.phoenix.exception.SQLExceptionCode.TTL_ALREADY_DEFINED_IN_HIERARCHY;
 import static org.apache.phoenix.exception.SQLExceptionCode.TTL_SUPPORTED_FOR_TABLES_AND_VIEWS_ONLY;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.util.PhoenixRuntime.TENANT_ID_ATTRIB;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -88,14 +90,14 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
     public TTLAsPhoenixTTLIT(boolean useExpression) {
         this.useExpression = useExpression;
         this.defaultTTL = useExpression ?
-                TTLExpression.create(DEFAULT_TTL_EXPRESSION) :
-                TTLExpression.create(DEFAULT_TTL_FOR_TEST);
+                TTLExpressionFactory.create(DEFAULT_TTL_EXPRESSION) :
+                TTLExpressionFactory.create(DEFAULT_TTL_FOR_TEST);
         this.defaultTTLDDLOption = useExpression ?
                 String.format("'%s'", DEFAULT_TTL_EXPRESSION) :
                 String.valueOf(DEFAULT_TTL_FOR_TEST);
         this.alterTTL = useExpression ?
-                TTLExpression.create(DEFAULT_TTL_EXPRESSION_FOR_ALTER) :
-                TTLExpression.create(DEFAULT_TTL_FOR_ALTER);
+                TTLExpressionFactory.create(DEFAULT_TTL_EXPRESSION_FOR_ALTER) :
+                TTLExpressionFactory.create(DEFAULT_TTL_FOR_ALTER);
         this.alterTTLDDLOption = useExpression ?
                 String.format("'%s'", DEFAULT_TTL_EXPRESSION_FOR_ALTER) :
                 String.valueOf(DEFAULT_TTL_FOR_ALTER);
@@ -146,8 +148,8 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
             String alterDDL = "ALTER TABLE " + tableName + " SET TTL = " + alterTTL;
             conn.createStatement().execute(alterDDL);
             TTLExpression expected = useExpression ?
-                    TTLExpression.create(DEFAULT_TTL_FOR_ALTER) :
-                    TTLExpression.create(DEFAULT_TTL_EXPRESSION_FOR_ALTER);
+                    TTLExpressionFactory.create(DEFAULT_TTL_FOR_ALTER) :
+                    TTLExpressionFactory.create(DEFAULT_TTL_EXPRESSION_FOR_ALTER);
             assertTTLValue(conn.unwrap(PhoenixConnection.class), expected, tableName);
         }
     }
@@ -170,7 +172,7 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
                         + " ) TTL=" + DEFAULT_TTL_FOR_TEST;
         Connection conn = DriverManager.getConnection(getUrl());
         conn.createStatement().execute(ddl);
-        TTLExpression expected = TTLExpression.create(DEFAULT_TTL_FOR_TEST);
+        TTLExpression expected = TTLExpressionFactory.create(DEFAULT_TTL_FOR_TEST);
         assertTTLValue(conn.unwrap(PhoenixConnection.class), expected, tableName);
         //Setting TTL should not be stored as CF Descriptor properties when
         //phoenix.table.ttl.enabled is true
@@ -194,7 +196,7 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             conn.createStatement().execute(ddl);
             assertTTLValue(conn.unwrap(PhoenixConnection.class),
-                    TTLExpression.TTL_EXPRESSION_FOREVER, tableName);
+                    TTL_EXPRESSION_FOREVER, tableName);
 
             ddl = "ALTER TABLE  " + tableName + " SET TTL=NONE";
             conn.createStatement().execute(ddl);
@@ -220,7 +222,7 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
             ddl = "ALTER TABLE  " + tableName + " SET TTL=FOREVER";
             conn.createStatement().execute(ddl);
             assertTTLValue(conn.unwrap(PhoenixConnection.class),
-                    TTLExpression.TTL_EXPRESSION_FOREVER, tableName);
+                    TTL_EXPRESSION_FOREVER, tableName);
             //Setting TTL should not be stored as CF Descriptor properties when
             //phoenix.table.ttl.enabled is true
             columnFamilies =
@@ -329,7 +331,7 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
             }
             String ttl = "ID2 = 34 AND COL2 > CURRENT_DATE() + 1000";
             conn.createStatement().execute(String.format(ddl, tableName, ttl));
-            TTLExpression expected = TTLExpression.create(ttl);
+            TTLExpression expected = TTLExpressionFactory.create(ttl);
             assertTTLValue(conn.unwrap(PhoenixConnection.class), expected, tableName);
 
             conn.createStatement().execute(String.format("ALTER TABLE %s SET TTL=NONE", tableName));
@@ -355,13 +357,13 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
 
             ttl = "COL2 > CURRENT_DATE() + 200 AND VINT > 123";
             conn.createStatement().execute(String.format(ddl, viewName, tableName, ttl));
-            expected = TTLExpression.create(ttl);
+            expected = TTLExpressionFactory.create(ttl);
             assertTTLValue(conn.unwrap(PhoenixConnection.class), expected, viewName);
 
             ttl = "COL2 > CURRENT_DATE() + 500 AND VINT > 123";
             conn.createStatement().execute(String.format("ALTER VIEW %s SET TTL='%s'",
                     viewName, ttl));
-            expected = TTLExpression.create(ttl);
+            expected = TTLExpressionFactory.create(ttl);
             assertTTLValue(conn.unwrap(PhoenixConnection.class), expected, viewName);
         }
     }
@@ -463,8 +465,8 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
 
             String viewName = createUpdatableViewOnTableWithTTL(conn, tableName, true);
             TTLExpression expectedChildTTl = useExpression ?
-                    TTLExpression.create(DEFAULT_TTL_EXPRESSION) :
-                    TTLExpression.create(DEFAULT_TTL_FOR_CHILD);
+                    TTLExpressionFactory.create(DEFAULT_TTL_EXPRESSION) :
+                    TTLExpressionFactory.create(DEFAULT_TTL_FOR_CHILD);
             assertTTLValue(conn.unwrap(PhoenixConnection.class), expectedChildTTl, viewName);
 
             try {
@@ -501,8 +503,8 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
             ddl = "ALTER VIEW " + viewName + " SET TTL=" + ttlAlter;
             conn.createStatement().execute(ddl);
             TTLExpression expectedAlterTTl = useExpression ?
-                    TTLExpression.create(DEFAULT_TTL_EXPRESSION_FOR_ALTER) :
-                    TTLExpression.create(DEFAULT_TTL_FOR_ALTER);
+                    TTLExpressionFactory.create(DEFAULT_TTL_EXPRESSION_FOR_ALTER) :
+                    TTLExpressionFactory.create(DEFAULT_TTL_FOR_ALTER);
             assertTTLValue(conn.unwrap(PhoenixConnection.class), expectedAlterTTl, viewName);
         }
     }
@@ -548,8 +550,8 @@ public class TTLAsPhoenixTTLIT extends ParallelStatsDisabledIT{
             clearCache(tenantConn1, null, childView1);
 
             TTLExpression expectedAlterTTl = useExpression ?
-                    TTLExpression.create(DEFAULT_TTL_EXPRESSION_FOR_ALTER) :
-                    TTLExpression.create(DEFAULT_TTL_FOR_ALTER);
+                    TTLExpressionFactory.create(DEFAULT_TTL_EXPRESSION_FOR_ALTER) :
+                    TTLExpressionFactory.create(DEFAULT_TTL_FOR_ALTER);
             //Assert TTL for each entity again with altered value
             assertTTLValue(conn.unwrap(PhoenixConnection.class), expectedAlterTTl, viewName);
             assertTTLValue(tenantConn.unwrap(PhoenixConnection.class), expectedAlterTTl, childView);

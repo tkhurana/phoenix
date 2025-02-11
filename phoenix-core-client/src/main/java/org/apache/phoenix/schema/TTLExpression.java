@@ -23,66 +23,11 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.HConstants;
 import org.apache.phoenix.coprocessor.generated.PTableProtos;
 import org.apache.phoenix.jdbc.PhoenixConnection;
-import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.parse.CreateTableStatement;
 
-public abstract class TTLExpression {
-
-    public static final TTLExpression TTL_EXPRESSION_FOREVER =
-            new LiteralTTLExpression(HConstants.FOREVER);
-    public static final TTLExpression TTL_EXPRESSION_NOT_DEFINED =
-            new LiteralTTLExpression(PhoenixDatabaseMetaData.TTL_NOT_DEFINED);
-
-    public static TTLExpression create(String ttlExpr) {
-        if (PhoenixDatabaseMetaData.NONE_TTL.equalsIgnoreCase(ttlExpr)) {
-            return TTL_EXPRESSION_NOT_DEFINED;
-        } else if (PhoenixDatabaseMetaData.FOREVER_TTL.equalsIgnoreCase(ttlExpr)) {
-            return TTL_EXPRESSION_FOREVER;
-        } else {
-            try {
-                int ttlValue = Integer.parseInt(ttlExpr);
-                return create(ttlValue);
-            } catch (NumberFormatException e) {
-                return new ConditionalTTLExpression(ttlExpr);
-            }
-        }
-    }
-
-    public static TTLExpression create (int ttlValue) {
-        if (ttlValue == PhoenixDatabaseMetaData.TTL_NOT_DEFINED) {
-            return TTL_EXPRESSION_NOT_DEFINED;
-        } else if (ttlValue == HConstants.FOREVER) {
-            return TTL_EXPRESSION_FOREVER;
-        } else {
-            return new LiteralTTLExpression(ttlValue);
-        }
-    }
-
-    public static TTLExpression create (TTLExpression ttlExpr) {
-        if (ttlExpr instanceof LiteralTTLExpression) {
-            return new LiteralTTLExpression((LiteralTTLExpression) ttlExpr);
-        } else {
-            return new ConditionalTTLExpression((ConditionalTTLExpression) ttlExpr);
-        }
-    }
-
-    public static TTLExpression create(byte[] phoenixTTL) throws IOException {
-        return createFromProto(PTableProtos.TTLExpression.parseFrom(phoenixTTL));
-    }
-
-    public static TTLExpression createFromProto(
-            PTableProtos.TTLExpression ttlExpressionProto) throws IOException {
-        if (ttlExpressionProto.hasLiteral()) {
-                return LiteralTTLExpression.createFromProto(ttlExpressionProto.getLiteral());
-        }
-        if (ttlExpressionProto.hasCondition()) {
-            return ConditionalTTLExpression.createFromProto(ttlExpressionProto.getCondition());
-        }
-        throw new RuntimeException("Unxexpected! Shouldn't reach here");
-    }
+public interface TTLExpression {
 
     /**
      * Serialize the TTL expression as a protobuf byte[]
@@ -91,8 +36,8 @@ public abstract class TTLExpression {
      * @return protobuf for the TTL expression
      * @throws SQLException
      */
-    public byte[] getTTLForScanAttribute(PhoenixConnection connection,
-                                         PTable table) throws SQLException {
+    default byte[] getTTLForScanAttribute(PhoenixConnection connection,
+                                          PTable table) throws SQLException {
         try {
             PTableProtos.TTLExpression proto = toProto(connection, table);
             return proto != null ? proto.toByteArray() : null;
@@ -102,35 +47,68 @@ public abstract class TTLExpression {
         }
     }
 
-    abstract public String getTTLExpression();
+    /**
+     * Returns the representation of the ttl expression as specified in the DDL
+     * @return string representation
+     */
+    String getTTLExpression();
 
     /**
      * Returns the TTL value used for masking in TTLRegionScanner
      * @param result Input row
      * @return ttl value in seconds
      */
-    abstract public long getRowTTLForMasking(List<Cell> result);
+    long getRowTTLForMasking(List<Cell> result);
 
     /**
      * Returns the TTL value used during compaction in CompactionScanner
      * @param result Input row
      * @return ttl value in seconds
      */
-    abstract public long getRowTTLForCompaction(List<Cell> result);
+    long getRowTTLForCompaction(List<Cell> result);
 
-    abstract public String toString();
+    String toString();
 
-    abstract public void validateTTLOnCreate(PhoenixConnection conn,
-                                             CreateTableStatement create,
-                                             PTable parent,
-                                             Map<String, Object> tableProps) throws SQLException;
+    /**
+     * Validate the TTL expression on CREATE [TABLE | VIEW | INDEX]
+     * @param conn Phoenix connection
+     * @param create CreateTable statement
+     * @param parent Null for base tables, parent of view or index
+     * @param tableProps Table properties passed in CREATE statement
+     * @throws SQLException
+     */
+    void validateTTLOnCreate(PhoenixConnection conn,
+                             CreateTableStatement create,
+                             PTable parent,
+                             Map<String, Object> tableProps) throws SQLException;
 
-    abstract public void validateTTLOnAlter(PhoenixConnection connection,
-                                            PTable table) throws SQLException;
+    /**
+     * Validate the TTL expression on ALTER [TABLE | VIEW]
+     * @param connection Phoenix connection
+     * @param table PTable of the entity being changed
+     * @throws SQLException
+     */
+    void validateTTLOnAlter(PhoenixConnection connection,
+                            PTable table) throws SQLException;
 
-    abstract public TTLExpression compileTTLExpression(
-            PhoenixConnection connection, PTable table) throws SQLException;
+    /**
+     * Compile the TTL expression so that it can be evaluated against of a row of cells
+     * @param connection Phoenix connection
+     * @param table PTable
+     * @return
+     * @throws SQLException
+     */
+    TTLExpression compileTTLExpression(PhoenixConnection connection,
+                                       PTable table) throws SQLException;
 
-    abstract public PTableProtos.TTLExpression toProto(
-            PhoenixConnection connection, PTable table) throws SQLException, IOException;
+    /**
+     * Serialize the TTLExpression to protobuf
+     * @param connection
+     * @param table
+     * @return
+     * @throws SQLException
+     * @throws IOException
+     */
+    PTableProtos.TTLExpression toProto(PhoenixConnection connection,
+                                       PTable table) throws SQLException, IOException;
 }

@@ -95,8 +95,8 @@ import static org.apache.phoenix.schema.PTableImpl.getColumnsToClone;
 import static org.apache.phoenix.schema.PTableType.CDC;
 import static org.apache.phoenix.schema.PTableType.INDEX;
 import static org.apache.phoenix.schema.PTableType.VIEW;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_FOREVER;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.util.PhoenixRuntime.TENANT_ID_ATTRIB;
 import static org.apache.phoenix.util.SchemaUtil.*;
 import static org.apache.phoenix.util.ViewUtil.findAllDescendantViews;
@@ -244,6 +244,7 @@ import org.apache.phoenix.schema.SequenceKey;
 import org.apache.phoenix.schema.SequenceNotFoundException;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.TTLExpression;
+import org.apache.phoenix.schema.TTLExpressionFactory;
 import org.apache.phoenix.schema.TableNotFoundException;
 import org.apache.phoenix.schema.export.SchemaRegistryRepository;
 import org.apache.phoenix.schema.export.SchemaRegistryRepositoryFactory;
@@ -1488,7 +1489,7 @@ TABLE_FAMILY_BYTES, TABLE_SEQ_NUM_BYTES);
                     ttlKv.getValueArray(),
                     ttlKv.getValueOffset(),
                     ttlKv.getValueLength());
-            ttl = TTLExpression.create(ttlStr);
+            ttl = TTLExpressionFactory.create(ttlStr);
         }
         ttl = ttlKv != null ? ttl : oldTable != null
                 ? oldTable.getTTLExpression() : TTL_EXPRESSION_NOT_DEFINED;
@@ -1820,7 +1821,7 @@ TABLE_FAMILY_BYTES, TABLE_SEQ_NUM_BYTES);
             if (result.getValue(TABLE_FAMILY_BYTES, TTL_BYTES) != null) {
                 String ttlStr = (String) PVarchar.INSTANCE.toObject(
                         result.getValue(DEFAULT_COLUMN_FAMILY_BYTES, TTL_BYTES));
-                return TTLExpression.create(ttlStr);
+                return TTLExpressionFactory.create(ttlStr);
             } else if (linkTypeBytes != null ) {
                 String parentSchema =SchemaUtil.getSchemaNameFromFullName(
                         rowKeyMetaData[PhoenixDatabaseMetaData.FAMILY_NAME_INDEX]);
@@ -1883,7 +1884,7 @@ TABLE_FAMILY_BYTES, TABLE_SEQ_NUM_BYTES);
             if (result.getValue(TABLE_FAMILY_BYTES, TTL_BYTES) != null) {
                 String ttlStr = (String) PVarchar.INSTANCE.toObject(
                         result.getValue(DEFAULT_COLUMN_FAMILY_BYTES, TTL_BYTES));
-                return TTLExpression.create(ttlStr);
+                return TTLExpressionFactory.create(ttlStr);
             }
             result = scanner.next();
         } while (result != null);
@@ -3867,7 +3868,7 @@ TABLE_FAMILY_BYTES, TABLE_SEQ_NUM_BYTES);
                     Cell cell = cells.get(0);
                     String newTTLStr = (String) PVarchar.INSTANCE.toObject(cell.getValueArray(),
                             cell.getValueOffset(), cell.getValueLength());
-                    TTLExpression newTTL = TTLExpression.create(newTTLStr);
+                    TTLExpression newTTL = TTLExpressionFactory.create(newTTLStr);
                     return !newTTL.equals(TTL_EXPRESSION_NOT_DEFINED);
                 }
             }

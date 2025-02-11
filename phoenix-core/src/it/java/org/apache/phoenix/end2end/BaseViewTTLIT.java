@@ -26,7 +26,7 @@ import static org.apache.phoenix.query.PhoenixTestBuilder.DDLDefaults.TENANT_VIE
 import static org.apache.phoenix.query.PhoenixTestBuilder.DDLDefaults.TENANT_VIEW_INDEX_COLUMNS;
 import static org.apache.phoenix.query.PhoenixTestBuilder.DDLDefaults.TENANT_VIEW_PK_COLUMNS;
 import static org.apache.phoenix.query.PhoenixTestBuilder.DDLDefaults.TENANT_VIEW_PK_TYPES;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.util.PhoenixRuntime.TENANT_ID_ATTRIB;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -88,6 +88,7 @@ import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTableKey;
 import org.apache.phoenix.schema.TTLExpression;
+import org.apache.phoenix.schema.TTLExpressionFactory;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.thirdparty.com.google.common.base.Joiner;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
@@ -289,8 +290,8 @@ public abstract class BaseViewTTLIT extends ParallelStatsDisabledIT {
             ResultSet rs = stmt.getResultSet();
             String ttlStr = rs.next() ? rs.getString(1) : null;
             TTLExpression actual = ttlStr != null ?
-                    TTLExpression.create(ttlStr): TTL_EXPRESSION_NOT_DEFINED;
-            TTLExpression expected = TTLExpression.create(ttlExpected);
+                    TTLExpressionFactory.create(ttlStr): TTL_EXPRESSION_NOT_DEFINED;
+            TTLExpression expected = TTLExpressionFactory.create(ttlExpected);
             assertEquals(String.format("Expected rows do not match for schema = %s, table = %s",
                     schemaName, tableName), expected, actual);
         }

@@ -28,6 +28,7 @@ import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.DEFAULT_TTL;
 import static org.apache.phoenix.query.QueryConstants.ENCODED_EMPTY_COLUMN_NAME;
 import static org.apache.phoenix.query.QueryServices.USE_STATS_FOR_PARALLELIZATION;
 import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_USE_STATS_FOR_PARALLELIZATION;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
 import static org.apache.phoenix.schema.types.PDataType.TRUE_BYTES;
 import static org.apache.phoenix.util.ByteUtil.EMPTY_BYTE_ARRAY;
 
@@ -106,6 +107,7 @@ import org.apache.phoenix.schema.RowKeySchema;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.TTLExpression;
 import org.apache.phoenix.schema.LiteralTTLExpression;
+import org.apache.phoenix.schema.TTLExpressionFactory;
 import org.apache.phoenix.schema.TableNotFoundException;
 import org.apache.phoenix.schema.ValueSchema.Field;
 import org.apache.phoenix.schema.transform.SystemTransformRecord;
@@ -1156,7 +1158,7 @@ public class ScanUtil {
         if (phoenixTTL == null) {
             return DEFAULT_TTL;
         }
-        TTLExpression ttlExpression = TTLExpression.create(phoenixTTL);
+        TTLExpression ttlExpression = TTLExpressionFactory.create(phoenixTTL);
         if (ttlExpression instanceof  LiteralTTLExpression) {
             LiteralTTLExpression literal = (LiteralTTLExpression)ttlExpression;
             return literal.getTTLValue();
@@ -1167,9 +1169,9 @@ public class ScanUtil {
     public static TTLExpression getTTLExpression(Scan scan) throws IOException {
         byte[] phoenixTTL = scan.getAttribute(BaseScannerRegionObserverConstants.TTL);
         if (phoenixTTL == null) {
-            return TTLExpression.TTL_EXPRESSION_FOREVER;
+            return TTL_EXPRESSION_FOREVER;
         }
-        return TTLExpression.create(phoenixTTL);
+        return TTLExpressionFactory.create(phoenixTTL);
     }
 
     public static boolean isPhoenixTableTTLEnabled(Configuration conf) {

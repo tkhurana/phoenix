@@ -20,6 +20,7 @@ package org.apache.phoenix.schema;
 import static org.apache.phoenix.exception.SQLExceptionCode.AGGREGATE_EXPRESSION_NOT_ALLOWED_IN_CONDITIONAL_TTL;
 import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_DROP_COL_REFERENCED_IN_CONDITIONAL_TTL;
 import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_SET_CONDITIONAL_TTL_ON_TABLE_WITH_MULTIPLE_COLUMN_FAMILIES;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.schema.PTableType.INDEX;
 import static org.apache.phoenix.util.TestUtil.retainSingleQuotes;
 import static org.junit.Assert.assertEquals;
@@ -452,7 +453,7 @@ public class ConditionalTTLExpressionTest extends BaseConnectionlessQueryTest {
             conn.createStatement().execute(ddl);
             ddl = String.format(viewTemplate, viewName, tableName, ttl);
             conn.createStatement().execute(ddl);
-            assertTTL(conn, tableName, TTLExpression.TTL_EXPRESSION_NOT_DEFINED);
+            assertTTL(conn, tableName, TTL_EXPRESSION_NOT_DEFINED);
             assertConditonTTL(conn, viewName, ttl);
             String query = String.format("select k3 from %s", viewName);
             validateScan(conn, viewName, query, ttl, false, 2);
@@ -478,8 +479,8 @@ public class ConditionalTTLExpressionTest extends BaseConnectionlessQueryTest {
             conn.createStatement().execute(ddl);
             ddl = String.format(childViewTemplate, childView, parentView, ttl);
             conn.createStatement().execute(ddl);
-            assertTTL(conn, tableName, TTLExpression.TTL_EXPRESSION_NOT_DEFINED);
-            assertTTL(conn, parentView, TTLExpression.TTL_EXPRESSION_NOT_DEFINED);
+            assertTTL(conn, tableName, TTL_EXPRESSION_NOT_DEFINED);
+            assertTTL(conn, parentView, TTL_EXPRESSION_NOT_DEFINED);
             assertConditonTTL(conn, childView, ttl);
             // create an index on child view
             ddl = String.format(indexOnChildTemplate, indexName, childView);

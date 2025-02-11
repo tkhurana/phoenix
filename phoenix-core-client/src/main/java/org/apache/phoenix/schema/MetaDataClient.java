@@ -32,8 +32,8 @@ import static org.apache.phoenix.query.QueryConstants.SPLITS_FILE;
 import static org.apache.phoenix.query.QueryConstants.SYSTEM_SCHEMA_NAME;
 import static org.apache.phoenix.query.QueryServices.INDEX_CREATE_DEFAULT_STATE;
 import static org.apache.phoenix.schema.PTableType.CDC;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_FOREVER;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.thirdparty.com.google.common.collect.Sets.newLinkedHashSet;
 import static org.apache.phoenix.thirdparty.com.google.common.collect.Sets.newLinkedHashSetWithExpectedSize;
 import static org.apache.phoenix.exception.SQLExceptionCode.INSUFFICIENT_MULTI_TENANT_COLUMNS;
@@ -3824,8 +3824,8 @@ public class MetaDataClient {
                         .setMaxLookbackAge(maxLookbackAge)
                         .setCDCIncludeScopes(cdcIncludeScopes)
                         .setTTL(ttl == null || ttl.equals(TTL_EXPRESSION_NOT_DEFINED) ?
-                                TTLExpression.create(ttlFromHierarchy) :
-                                TTLExpression.create(ttl))
+                                TTLExpressionFactory.create(ttlFromHierarchy) :
+                                TTLExpressionFactory.create(ttl))
                         .setRowKeyMatcher(rowKeyMatcher)
                         .build();
                 result = new MetaDataMutationResult(code, result.getMutationTime(), table, true);

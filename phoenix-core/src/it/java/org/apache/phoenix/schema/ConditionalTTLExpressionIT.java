@@ -24,6 +24,7 @@ import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEF
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.BEFORE_REBUILD_VALID_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.REBUILT_INDEX_ROW_COUNT;
 import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.SCANNED_DATA_ROW_COUNT;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -732,7 +733,7 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
             String cdcIndexName = SchemaUtil.getTableName(schemaName,
                     CDCUtil.getCDCIndexName(cdcName));
             PTable cdcIndex = ((PhoenixConnection) conn).getTableNoCache(cdcIndexName);
-            assertEquals(cdcIndex.getTTLExpression(), TTLExpression.TTL_EXPRESSION_FOREVER);
+            assertEquals(cdcIndex.getTTLExpression(), TTL_EXPRESSION_FOREVER);
 
             // get row count on base table no row should be masked
             actual = TestUtil.getRowCount(conn, tableName, true);
@@ -758,7 +759,7 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
             String alterDDL = String.format("alter table %s set TTL='%s = %d'", tableName, ttlCol, 0);
             conn.createStatement().execute(alterDDL);
             cdcIndex = ((PhoenixConnection) conn).getTableNoCache(cdcIndexName);
-            assertEquals(cdcIndex.getTTLExpression(), TTLExpression.TTL_EXPRESSION_FOREVER);
+            assertEquals(cdcIndex.getTTLExpression(), TTL_EXPRESSION_FOREVER);
         }
     }
 

@@ -18,6 +18,8 @@
 package org.apache.phoenix.end2end;
 
 import static org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants.PHOENIX_MAX_LOOKBACK_AGE_CONF_KEY;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -834,7 +836,7 @@ public abstract class SetPropertyIT extends ParallelStatsDisabledIT {
                 assertEquals("XYZ", columnFamilies[0].getNameAsString());
                 assertEquals(HConstants.FOREVER, columnFamilies[0].getTimeToLive());
                 //Check if TTL is stored in SYSCAT as well and we are getting ttl from get api in PTable
-                assertEquals(TTLExpression.TTL_EXPRESSION_NOT_DEFINED, conn.unwrap(PhoenixConnection.class).getTable(
+                assertEquals(TTL_EXPRESSION_NOT_DEFINED, conn.unwrap(PhoenixConnection.class).getTable(
                         new PTableKey(null, dataTableFullName)).getTTLExpression());
             }
             ddl = "ALTER TABLE " + dataTableFullName + " SET TTL=FOREVER";
@@ -847,7 +849,7 @@ public abstract class SetPropertyIT extends ParallelStatsDisabledIT {
                 assertEquals(HConstants.FOREVER, columnFamilies[0].getTimeToLive());
                 assertEquals("XYZ", columnFamilies[0].getNameAsString());
                 //Check if Alter Table TTL also changes TTL stored in SYSCAT with phoenix.table.ttl disabled
-                assertEquals(TTLExpression.TTL_EXPRESSION_FOREVER, conn.unwrap(PhoenixConnection.class).getTable(
+                assertEquals(TTL_EXPRESSION_FOREVER, conn.unwrap(PhoenixConnection.class).getTable(
                         new PTableKey(null, dataTableFullName)).getTTLExpression());
             }
         } finally {

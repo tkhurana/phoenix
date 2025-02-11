@@ -48,7 +48,7 @@ import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_TRANSACTION_
 import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_UPDATE_CACHE_FREQUENCY;
 import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_USE_STATS_FOR_PARALLELIZATION;
 import static org.apache.phoenix.schema.SaltingUtil.SALTING_COLUMN;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 import static org.apache.phoenix.schema.TableProperty.DEFAULT_COLUMN_FAMILY;
 import static org.apache.phoenix.schema.types.PDataType.TRUE_BYTES;
 
@@ -2081,7 +2081,7 @@ public class PTableImpl implements PTable {
         TTLExpression ttl = TTL_EXPRESSION_NOT_DEFINED;
         if (table.hasTtl()) {
             String ttlExpr = (String) PVarchar.INSTANCE.toObject(table.getTtl().toByteArray());
-            ttl = TTLExpression.create(ttlExpr);
+            ttl = TTLExpressionFactory.create(ttlExpr);
         }
 
         byte[] rowKeyMatcher = null;

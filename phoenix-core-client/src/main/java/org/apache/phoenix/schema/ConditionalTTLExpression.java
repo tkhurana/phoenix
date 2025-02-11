@@ -79,7 +79,7 @@ import org.apache.phoenix.util.ViewUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class ConditionalTTLExpression extends TTLExpression {
+public class ConditionalTTLExpression implements TTLExpression {
     private static final Logger LOGGER = LoggerFactory.getLogger(ConditionalTTLExpression.class);
 
     // expression as passed in the DDL statement and stored in syscat

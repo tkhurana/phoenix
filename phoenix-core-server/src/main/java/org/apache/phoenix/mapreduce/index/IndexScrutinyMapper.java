@@ -70,7 +70,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.phoenix.thirdparty.com.google.common.base.Joiner;
 
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.DEFAULT_TTL;
-import static org.apache.phoenix.schema.TTLExpression.TTL_EXPRESSION_NOT_DEFINED;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_NOT_DEFINED;
 
 /**
  * Mapper that reads from the data table and checks the rows against the index table

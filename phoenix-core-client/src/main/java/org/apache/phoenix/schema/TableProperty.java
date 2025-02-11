@@ -259,12 +259,12 @@ public enum TableProperty {
         @Override
         public Object getValue(Object value) {
             if (value instanceof String) {
-                return TTLExpression.create((String)value);
+                return TTLExpressionFactory.create((String)value);
             } else if (value != null) {
                 //Not converting to milli-seconds for better understanding at compaction and masking
                 //stage. As HBase Descriptor level gives this value in seconds.
                 int ttlValue = ((Number) value).intValue();
-                return TTLExpression.create(ttlValue);
+                return TTLExpressionFactory.create(ttlValue);
             }
             return value;
         }

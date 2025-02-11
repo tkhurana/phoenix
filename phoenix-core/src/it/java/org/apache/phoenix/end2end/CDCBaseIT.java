@@ -79,6 +79,7 @@ import static org.apache.phoenix.query.QueryConstants.CDC_JSON_COL_NAME;
 import static org.apache.phoenix.query.QueryConstants.CDC_POST_IMAGE;
 import static org.apache.phoenix.query.QueryConstants.CDC_PRE_IMAGE;
 import static org.apache.phoenix.query.QueryConstants.CDC_UPSERT_EVENT_TYPE;
+import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
 import static org.apache.phoenix.util.MetaDataUtil.getViewIndexPhysicalName;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -221,7 +222,7 @@ public class CDCBaseIT extends ParallelStatsDisabledIT {
         assertEquals(cdcTable.getPhysicalName().getString(), tableName == datatableName ?
                 indexFullName : getViewIndexPhysicalName(datatableName));
         PTable cdcIndexTable = PhoenixRuntime.getTable(conn, indexFullName);
-        assertEquals(cdcIndexTable.getTTLExpression(), TTLExpression.TTL_EXPRESSION_FOREVER);
+        assertEquals(cdcIndexTable.getTTLExpression(), TTL_EXPRESSION_FOREVER);
     }
 
     protected void assertSaltBuckets(Connection conn, String tableName, Integer nbuckets)

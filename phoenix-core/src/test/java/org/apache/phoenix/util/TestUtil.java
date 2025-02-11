@@ -149,6 +149,7 @@ import org.apache.phoenix.schema.PTableKey;
 import org.apache.phoenix.schema.RowKeyValueAccessor;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.TTLExpression;
+import org.apache.phoenix.schema.TTLExpressionFactory;
 import org.apache.phoenix.schema.TableRef;
 import org.apache.phoenix.schema.stats.GuidePostsInfo;
 import org.apache.phoenix.schema.stats.GuidePostsKey;
@@ -1406,9 +1407,10 @@ public class TestUtil {
             tableTTL = conn.unwrap(PhoenixConnection.class).getTable(new PTableKey(null,
                     tableName.getNameAsString())).getTTLExpression();
         } else {
-            tableTTL = TTLExpression.create(getColumnDescriptor(conn, tableName).getTimeToLive());
+            tableTTL = TTLExpressionFactory.create(
+                    getColumnDescriptor(conn, tableName).getTimeToLive());
         }
-        TTLExpression expectedTTL = TTLExpression.create(ttl);
+        TTLExpression expectedTTL = TTLExpressionFactory.create(ttl);
         Assert.assertEquals(expectedTTL, tableTTL);
     }
 

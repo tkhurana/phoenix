@@ -24,6 +24,7 @@ import java.util.Arrays;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.schema.TTLExpression;
 
+import org.apache.phoenix.schema.TTLExpressionFactory;
 import org.apache.phoenix.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
@@ -43,7 +44,7 @@ public class TableTTLInfo implements Comparable {
         this.tenantId = tenantId.getBytes(StandardCharsets.UTF_8);
         this.entityName = entityName.getBytes(StandardCharsets.UTF_8);
         this.matchPattern = matchPattern.getBytes(StandardCharsets.UTF_8);
-        this.ttl = TTLExpression.create(ttl);
+        this.ttl = TTLExpressionFactory.create(ttl);
     }
 
     @VisibleForTesting
@@ -53,7 +54,7 @@ public class TableTTLInfo implements Comparable {
         this.tenantId = tenantId;
         this.matchPattern = matchPattern;
         this.entityName = entityName;
-        this.ttl = TTLExpression.create(ttl);
+        this.ttl = TTLExpressionFactory.create(ttl);
     }
 
     public TableTTLInfo(String physicalTableName, String tenantId, String entityName, String matchPattern, TTLExpression ttl) {
