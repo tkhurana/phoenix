@@ -297,8 +297,7 @@ public class ConditionalTTLExpression implements TTLExpression {
     }
 
     @Override
-    public PTableProtos.TTLExpression toProto(PhoenixConnection connection,
-                                              PTable table) throws SQLException, IOException {
+    public PTableProtos.TTLExpression toProto() throws SQLException, IOException {
         if (compiledExpr == null || conditionExprColumns == null) {
             throw new RuntimeException(
                     String.format("Conditional TTL Expression %s not compiled", this.ttlExpr));

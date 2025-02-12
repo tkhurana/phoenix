@@ -1448,7 +1448,7 @@ public class ScanUtil {
         // Otherwise, we can cache stale values and keep reusing the stale values which can give
         // incorrect results.
         TTLExpression ttlExpr = table.getCompiledTTLExpression(phoenixConnection);
-        byte[] ttlForScan = ttlExpr.getTTLForScanAttribute(phoenixConnection, table);
+        byte[] ttlForScan = ttlExpr.serialize();
         if (ttlForScan != null) {
             byte[] emptyColumnFamilyName = SchemaUtil.getEmptyColumnFamily(table);
             byte[] emptyColumnName =
@@ -1761,6 +1761,20 @@ public class ScanUtil {
         if (table.getLastDDLTimestamp() != null) {
             mutation.setAttribute(MutationState.MutationMetadataType.TIMESTAMP.toString(),
                     Bytes.toBytes(table.getLastDDLTimestamp()));
+        }
+    }
+
+    public static void annotateMutationWithConditionalTTL(
+            PhoenixConnection connection, PTable table,
+            List<? extends Mutation> mutations) throws SQLException {
+
+        if (!table.hasConditionalTTL()) {
+            return;
+        }
+        TTLExpression ttlExpr = table.getCompiledTTLExpression(connection);
+        byte[] ttl = ttlExpr.serialize();
+        for (Mutation mutation : mutations) {
+            mutation.setAttribute(BaseScannerRegionObserverConstants.TTL, ttl);
         }
     }
 

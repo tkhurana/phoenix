@@ -66,7 +66,7 @@ public class TTLExpressionTest {
                 TTLExpressionFactory.create(PhoenixDatabaseMetaData.NONE_TTL));
         assertEquals(TTL_EXPRESSION_NOT_DEFINED,
                 TTLExpressionFactory.create(PhoenixDatabaseMetaData.TTL_NOT_DEFINED));
-        assertNull(TTL_EXPRESSION_NOT_DEFINED.getTTLForScanAttribute(pconn, table));
+        assertNull(TTL_EXPRESSION_NOT_DEFINED.serialize());
     }
 
     @Test(expected = IllegalArgumentException.class)

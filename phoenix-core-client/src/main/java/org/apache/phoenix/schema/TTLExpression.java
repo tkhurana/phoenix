@@ -31,15 +31,12 @@ public interface TTLExpression {
 
     /**
      * Serialize the TTL expression as a protobuf byte[]
-     * @param connection
-     * @param table
      * @return protobuf for the TTL expression
      * @throws SQLException
      */
-    default byte[] getTTLForScanAttribute(PhoenixConnection connection,
-                                          PTable table) throws SQLException {
+    default byte[] serialize() throws SQLException {
         try {
-            PTableProtos.TTLExpression proto = toProto(connection, table);
+            PTableProtos.TTLExpression proto = toProto();
             return proto != null ? proto.toByteArray() : null;
         } catch (IOException e) {
             throw new SQLException(
@@ -103,12 +100,9 @@ public interface TTLExpression {
 
     /**
      * Serialize the TTLExpression to protobuf
-     * @param connection
-     * @param table
      * @return
      * @throws SQLException
      * @throws IOException
      */
-    PTableProtos.TTLExpression toProto(PhoenixConnection connection,
-                                       PTable table) throws SQLException, IOException;
+    PTableProtos.TTLExpression toProto() throws SQLException, IOException;
 }

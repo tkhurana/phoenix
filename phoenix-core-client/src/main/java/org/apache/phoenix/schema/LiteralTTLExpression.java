@@ -102,8 +102,7 @@ public class LiteralTTLExpression implements TTLExpression {
     }
 
     @Override
-    public PTableProtos.TTLExpression toProto(PhoenixConnection connection,
-                                              PTable table) throws SQLException {
+    public PTableProtos.TTLExpression toProto() throws SQLException {
         if (this.equals(TTL_EXPRESSION_NOT_DEFINED)) {
             return null;
         }

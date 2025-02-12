@@ -539,7 +539,7 @@ public class ScanUtilTest {
                 long timestamp44 = 44L;
                 Scan testScan = new Scan();
                 LiteralTTLExpression ttl = new LiteralTTLExpression(1);
-                byte[] ttlBytes = ttl.toProto(phxConn, table).toByteArray();
+                byte[] ttlBytes = ttl.serialize();
                 testScan.setAttribute(BaseScannerRegionObserverConstants.TTL, ttlBytes);
                 // Test isTTLExpired
                 Assert.assertTrue(ScanUtil.isTTLExpired(cell42, testScan, timestamp44));
