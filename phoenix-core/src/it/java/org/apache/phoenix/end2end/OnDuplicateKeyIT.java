@@ -830,6 +830,46 @@ public class OnDuplicateKeyIT extends ParallelStatsDisabledIT {
         }
     }
 
+    @Test
+    public void testConditionalTTL() throws Exception {
+        Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
+        String tableName = generateUniqueName();
+        String ttlExpression = "counter1 >= 100";
+        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+            String ddl = String.format("create table %s (pk varchar primary key, counter1 bigint," +
+                    " counter2 bigint) TTL='%s'", tableName, ttlExpression);
+            conn.createStatement().execute(ddl);
+            createIndex(conn, tableName);
+
+            // row doesn't exist
+            conn.createStatement().execute(
+                    String.format("UPSERT INTO %s VALUES('a',0, 0)", tableName));
+            conn.commit();
+            for (int i = 0; i < 2; ++i) {
+                conn.createStatement().execute(
+                    String.format("UPSERT INTO %s VALUES('a', 0, 0) ON DUPLICATE KEY UPDATE " +
+                        "counter1 = counter1 + 50, counter2 = counter2 + 10", tableName));
+                conn.commit();
+            }
+            String dql = String.format(
+                    "select counter1, counter2 from %s where pk = 'a'", tableName);
+            try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
+                // row should have expired
+                assertFalse("row should have expired", rs.next());
+            }
+            // update over an expired row should be treated as a new row
+            conn.createStatement().execute(
+                    String.format("UPSERT INTO %s (pk, counter1) VALUES('a', -1, -1) ON DUPLICATE KEY UPDATE " +
+                            "counter1 = counter1 + 50, counter2 = counter2 + 10", tableName));
+            conn.commit();
+            try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
+                assertTrue(rs.next());
+                assertEquals(-1, rs.getInt("counter1"));
+                assertEquals(-1, rs.getInt("counter2"));
+            }
+        }
+    }
+
     private void assertRow(Connection conn, String tableName, String expectedPK, int expectedCol1, String expectedCol2) throws SQLException {
         ResultSet rs = conn.createStatement().executeQuery("SELECT * FROM " + tableName);
         assertTrue(rs.next());
