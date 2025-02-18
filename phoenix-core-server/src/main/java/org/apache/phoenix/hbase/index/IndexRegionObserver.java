@@ -41,12 +41,16 @@ import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.hadoop.hbase.CellScanner;
+import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.phoenix.coprocessor.generated.PTableProtos;
+import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
 import org.apache.phoenix.execute.MutationState;
 import org.apache.phoenix.expression.CaseExpression;
 import org.apache.phoenix.index.PhoenixIndexBuilderHelper;
+import org.apache.phoenix.schema.ConditionalTTLExpression;
+import org.apache.phoenix.schema.TTLExpressionFactory;
 import org.apache.phoenix.schema.types.PInteger;
 import org.apache.phoenix.thirdparty.com.google.common.base.Preconditions;
 import org.apache.phoenix.thirdparty.com.google.common.collect.ArrayListMultimap;
@@ -144,6 +148,10 @@ import static org.apache.phoenix.coprocessor.IndexRebuildRegionScanner.removeCol
 import static org.apache.phoenix.index.PhoenixIndexBuilderHelper.ATOMIC_OP_ATTRIB;
 import static org.apache.phoenix.index.PhoenixIndexBuilderHelper.RETURN_RESULT;
 import static org.apache.phoenix.util.ByteUtil.EMPTY_BYTE_ARRAY;
+
+import javax.ws.rs.PUT;
+
+import com.beust.jcommander.internal.Sets;
 
 /**
  * Do all the work of managing index updates from a single coprocessor. All Puts/Delets are passed
@@ -277,6 +285,7 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
       private boolean hasLocalIndex;
       private boolean hasTransform;
       private boolean returnResult;
+      private boolean hasConditionalTTL; // table has Conditional TTL
 
       public BatchMutateContext() {
           this.clientVersion = 0;
@@ -532,8 +541,8 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
           BatchMutateContext context) {
       for (int i = 0; i < miniBatchOp.size(); i++) {
           Mutation m = miniBatchOp.getOperation(i);
-          if (this.builder.isAtomicOp(m) || context.returnResult ||
-                  this.builder.isEnabled(m)) {
+          if (this.builder.isAtomicOp(m) || context.returnResult
+                  || this.builder.isEnabled(m) || this.builder.hasConditionalTTL(m)) {
               ImmutableBytesPtr row = new ImmutableBytesPtr(m.getRow());
               context.rowsToLock.add(row);
           }
@@ -616,6 +625,108 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
       }
   }
 
+  private void updateMutationsForConditionalTTL(MiniBatchOperationInProgress<Mutation> miniBatchOp,
+                                                BatchMutateContext context) throws IOException {
+
+      // mapping from row key to indices in mini batch
+      Map<ImmutableBytesPtr, List<Integer>> expiredVersions = Maps.newHashMap();
+      Set<ImmutableBytesPtr> notExpiredVersions = Sets.newHashSet();
+      for (int i = 0; i < miniBatchOp.size(); i++) {
+          if (isAtomicOperationComplete(miniBatchOp.getOperationStatus(i))) {
+              continue;
+          }
+          Mutation m = miniBatchOp.getOperation(i);
+          if (!builder.hasConditionalTTL(m)) {
+              continue;
+          }
+          ImmutableBytesPtr row = new ImmutableBytesPtr(m.getRow());
+          Pair<Put, Put> dataRowState = context.dataRowStates.get(row);
+          if (dataRowState == null) {
+              continue;
+          }
+          Put currentVersion = dataRowState.getFirst();
+          if (currentVersion == null) {
+              continue;
+          }
+          if (notExpiredVersions.contains(row)) {
+              continue;
+          }
+          List<Integer> positions = expiredVersions.get(row);
+          if (positions != null) {
+              positions.add(i);
+              continue;
+          }
+          byte[] ttl = m.getAttribute(BaseScannerRegionObserverConstants.TTL);
+          ConditionalTTLExpression ttlExpr =
+                  (ConditionalTTLExpression) TTLExpressionFactory.create(ttl);
+          List<Cell> ttlCols =
+                  IndexUtil.readColumnsFromRow(currentVersion, ttlExpr.getColumnsReferenced());
+          if (ttlExpr.isExpired(ttlCols)) {
+              // current version is expired
+              positions = Lists.newArrayListWithExpectedSize(2);
+              positions.add(i);
+              expiredVersions.put(row, positions);
+          } else {
+              notExpiredVersions.add(row);
+          }
+      }
+
+      for (Map.Entry<ImmutableBytesPtr, List<Integer>> entry : expiredVersions.entrySet()) {
+          ImmutableBytesPtr key = entry.getKey();
+          List<Integer> positions = entry.getValue();
+          Pair<Put, Put> dataRowState = context.dataRowStates.get(key);
+          Put currentVersion = dataRowState.getFirst();
+          List<ColumnReference> colsToBeMasked = Lists.newArrayList();
+          for (List<Cell> cells : currentVersion.getFamilyCellMap().values()) {
+              for (Cell cell : cells) {
+                  boolean masked = true;
+                  for (Integer pos : positions) {
+                      Mutation m = miniBatchOp.getOperation(pos);
+                      if (m.has(cell.getFamilyArray(), cell.getQualifierArray())) {
+                          masked = false;
+                          break;
+                      }
+                      Mutation[] added = miniBatchOp.getOperationsFromCoprocessors(pos);
+                      if (added != null) {
+                          for (Mutation mcoproc : added) {
+                              if (mcoproc.has(cell.getFamilyArray(), cell.getQualifierArray())) {
+                                  masked = false;
+                                  break;
+                              }
+                          }
+                      }
+                  }
+                  if (masked) {
+                      ColumnReference colRef = new ColumnReference(CellUtil.cloneFamily(cell),
+                              CellUtil.cloneQualifier(cell));
+                      colsToBeMasked.add(colRef);
+                  }
+              }
+          }
+          if (!colsToBeMasked.isEmpty()) {
+              Mutation m = miniBatchOp.getOperation(positions.get(0));
+              Delete masked;
+              Mutation[] added = miniBatchOp.getOperationsFromCoprocessors(positions.get(0));
+              if (added == null) {
+                  masked = new Delete(m.getRow());
+                  miniBatchOp.addOperationsFromCP(positions.get(0), new Mutation[] {masked});
+              } else {
+                  // added mutations are always Delete mutations generated by the server
+                  // in case of ON DUPLICATE KEY statements which assign nulls to columns
+                  masked = (Delete) added[0];
+              }
+              for (ColumnReference col : colsToBeMasked) {
+                  KeyValue kv = GenericKeyValueBuilder.INSTANCE.buildDeleteColumns(
+                          key,
+                          col.getFamilyWritable(),
+                          col.getQualifierWritable(),
+                          HConstants.LATEST_TIMESTAMP);
+                  masked.add(kv);
+              }
+          }
+      }
+  }
+
   private void lockRows(BatchMutateContext context) throws IOException {
       for (ImmutableBytesPtr rowKey : context.rowsToLock) {
           context.rowLocks.add(lockManager.lockRow(rowKey, rowLockWaitDuration));
@@ -665,11 +776,12 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
                 continue;
             }
             Mutation m = miniBatchOp.getOperation(i);
-            // skip this mutation if we aren't enabling indexing or not an atomic op
-            // or if it is an atomic op and its timestamp is already set(not LATEST)
-            if (!builder.isEnabled(m) &&
-                    !((builder.isAtomicOp(m) || builder.returnResult(m)) &&
-                            IndexUtil.getMaxTimestamp(m) == HConstants.LATEST_TIMESTAMP)) {
+            // skip this mutation if we aren't enabling indexing or Conditional TTL
+            // or not an atomic op or if it is an atomic op
+            // and its timestamp is already set(not LATEST)
+            if (!builder.isEnabled(m) && !builder.hasConditionalTTL(m)
+                    && !((builder.isAtomicOp(m) || builder.returnResult(m))
+                    && IndexUtil.getMaxTimestamp(m) == HConstants.LATEST_TIMESTAMP)) {
                 continue;
             }
             setTimestampOnMutation(m, ts);
@@ -1179,6 +1291,9 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
             if (this.builder.returnResult(m) && miniBatchOp.size() == 1) {
                 context.returnResult = true;
             }
+            if (this.builder.hasConditionalTTL(m)) {
+                context.hasConditionalTTL = true;
+            }
             if (this.builder.isAtomicOp(m) || this.builder.returnResult(m)) {
                 context.hasAtomic = true;
                 if (context.hasRowDelete) {
@@ -1328,15 +1443,18 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
         lockRows(context);
         long onDupCheckTime = 0;
 
-        if (context.hasAtomic || context.returnResult || context.hasGlobalIndex ||
-                context.hasUncoveredIndex || context.hasTransform) {
+        if (context.hasAtomic || context.returnResult || context.hasGlobalIndex
+                || context.hasUncoveredIndex || context.hasTransform
+                || context.hasConditionalTTL) {
             // Retrieve the current row states from the data table while holding the lock.
             // This is needed for both atomic mutations and global indexes
             long start = EnvironmentEdgeManager.currentTimeMillis();
-            context.dataRowStates = new HashMap<ImmutableBytesPtr, Pair<Put, Put>>(context.rowsToLock.size());
-            if (context.hasGlobalIndex || context.hasTransform || context.hasAtomic ||
-                    context.returnResult || context.hasRowDelete || (context.hasUncoveredIndex &&
-                    isPartialUncoveredIndexMutation(indexMetaData, miniBatchOp))) {
+            context.dataRowStates =
+                    new HashMap<ImmutableBytesPtr, Pair<Put, Put>>(context.rowsToLock.size());
+            if (context.hasGlobalIndex || context.hasTransform || context.hasAtomic
+                    || context.returnResult || context.hasRowDelete || context.hasConditionalTTL
+                    || (context.hasUncoveredIndex
+                    && isPartialUncoveredIndexMutation(indexMetaData, miniBatchOp))) {
                 getCurrentRowStates(c, context);
             }
             onDupCheckTime += (EnvironmentEdgeManager.currentTimeMillis() - start);
@@ -1357,6 +1475,10 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
             if (context.rowsToLock.isEmpty()) {
                 return;
             }
+        }
+
+        if (context.hasConditionalTTL) {
+            updateMutationsForConditionalTTL(miniBatchOp, context);
         }
 
         TableName table = c.getEnvironment().getRegion().getRegionInfo().getTable();

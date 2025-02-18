@@ -27,6 +27,7 @@ import static org.apache.phoenix.mapreduce.index.PhoenixIndexToolJobCounters.SCA
 import static org.apache.phoenix.schema.LiteralTTLExpression.TTL_EXPRESSION_FOREVER;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
@@ -65,6 +66,7 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 import org.apache.phoenix.util.CDCUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
+import org.apache.phoenix.util.IndexScrutiny;
 import org.apache.phoenix.util.ManualEnvironmentEdge;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.ReadOnlyProps;
@@ -167,6 +169,67 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
     }
 
     @Test
+    public void testNulls() throws Exception {
+        int nThreads = 1;//10;
+        final int batchSize = 10; //100;
+        final int nRows = 5;
+        final int nIndexValues = 23;
+        final String tableName = generateUniqueName();
+        final String indexName = generateUniqueName();
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute("CREATE TABLE " + tableName
+                    + "(k1 INTEGER NOT NULL, k2 INTEGER NOT NULL, v1 INTEGER, v2 INTEGER, v3 INTEGER, v4 INTEGER," +
+                    "CONSTRAINT pk PRIMARY KEY (k1,k2))  COLUMN_ENCODED_BYTES = 0, VERSIONS=1, MAX_LOOKBACK_AGE=1000000, TTL='v2 is null and v3 = -1'");
+            /*conn.createStatement().execute("CREATE INDEX " + indexName + " ON "
+                    + tableName + "(v1) INCLUDE(v2, v3)");*/
+            /*for (int i = 0; i < 20; i++) {
+                conn.createStatement().execute(
+                        "UPSERT INTO " + tableName + " VALUES (" + (i % nRows) + ", 0, "
+                                + (RAND.nextBoolean() ? null : (RAND.nextInt() % nIndexValues)) + ", "
+                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ", "
+                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ", "
+                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ")");
+            }
+            conn.commit();
+            for (int i = 0; i < 20; i++) {
+                conn.createStatement().execute(
+                        "UPSERT INTO " + tableName + " VALUES (" + (i % nRows) + ", 0, "
+                                + (RAND.nextBoolean() ? null : (RAND.nextInt() % nIndexValues)) + ", "
+                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ", "
+                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ", "
+                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ")");
+            }
+            conn.createStatement().execute("DELETE FROM " + tableName + " WHERE k1 = 2");
+             */
+            conn.createStatement().execute(
+                    "UPSERT INTO " + tableName + "(k1, k2, v1, v3) VALUES (2,0, 10, 12)");
+            conn.commit();
+            TestUtil.dumpTable(conn, TableName.valueOf(tableName));
+            String dql = "select v1,v2,v3 from " + tableName;
+            try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
+                assertTrue(rs.next());
+                System.out.println(rs.getInt(1));
+                System.out.println(rs.getInt(2));
+                System.out.println(rs.getInt(3));
+            }
+            conn.createStatement().execute(
+                    "UPSERT INTO " + tableName + "(k1, k2, v2, v3) VALUES (2, 0, null, -1)");
+            conn.commit();
+            TestUtil.dumpTable(conn, TableName.valueOf(tableName));
+            try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
+                while(rs.next()) {
+                    System.out.println(rs.getInt(1));
+                    System.out.println(rs.getInt(2));
+                    System.out.println(rs.getInt(3));
+                }
+            }
+            doMajorCompaction(tableName);
+            //TestUtil.dumpTable(conn, TableName.valueOf(indexName));
+            //IndexScrutiny.scrutinizeIndex(conn, tableName, indexName);
+        }
+    }
+
+    @Test
     public void testBasicMaskingAndCompaction() throws Exception {
         String ttlCol = "VAL5";
         String ttlExpression = String.format("%s=TRUE", ttlCol);
@@ -203,11 +266,17 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
             actual = TestUtil.getRowCountFromIndex(conn, tableName, indexName);
             Assert.assertEquals(rowCount - 2, actual);
 
-            // refresh the row again
+            // refresh the row again, this update should behave like a new row
             updateColumn(conn, 3, ttlCol, false);
             rs = readRow(conn, 3);
             assertTrue(rs.next());
-            assertFalse(rs.getBoolean(ttlCol));
+            for (String col : COLUMNS) {
+                if (!col.equals(ttlCol)) {
+                    assertNull(rs.getObject(col));
+                } else {
+                    assertFalse(rs.getBoolean(ttlCol));
+                }
+            }
             actual = TestUtil.getRowCount(conn, tableName, true);
             Assert.assertEquals(rowCount - 1, actual);
             actual = TestUtil.getRowCountFromIndex(conn, tableName, indexName);
@@ -296,8 +365,9 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
             }
             // row position 2 updated 1 time 2 cells (column and empty column)
             expectedCellCount.addOrUpdateCells(dataRowPosToKey.get(2), 1*2);
-            // row position 3 updated 3 times
-            expectedCellCount.addOrUpdateCells(dataRowPosToKey.get(3), 3*2);
+            // row position 3 updated 3 times ( not expired -> expired -> not expired -> expired)
+            // update on an expired row is a full row update
+            expectedCellCount.addOrUpdateCells(dataRowPosToKey.get(3), 2*2 + COLUMNS.length + 1);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey.values());
         }
     }
@@ -324,25 +394,32 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
             // all previous updates of the expired row fall out of maxlookback window
             injectEdge.incrementValue(tableLevelMaxLookback+5);
             // update another column not part of ttl expression
+            // This is an update on an expired row, all the other columns will be masked but the
+            // row is no longer masked since the ttl column is now null
             updateColumn(conn, 0, "VAL2", 2345);
+            // verify that the row is not masked
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount, actual);
             // only the last update should be visible in the maxlookback window
             injectEdge.incrementValue(1);
             doMajorCompaction(tableName);
-            // the row should still be present because of maxlookback but masked
+            // the row should still be present because of maxlookback but not masked
             CellCount expectedCellCount = new CellCount();
             for (int i = 0; i < rowCount; ++i) {
                 // additional cell for empty column
                 expectedCellCount.insertRow(dataRowPosToKey.get(i), COLUMNS.length + 1);
             }
-            expectedCellCount.addOrUpdateCells(dataRowPosToKey.get(0), 2);
+            // 2 cells for the updated + remaining DeleteColumn cells
+            expectedCellCount.addOrUpdateCells(dataRowPosToKey.get(0), COLUMNS.length + 1);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey.values());
-            // verify that the row is being masked
+            // verify that the row is not masked
             actual = TestUtil.getRowCount(conn, tableName, true);
-            assertEquals(rowCount - 1, actual);
+            assertEquals(rowCount, actual);
             // no row versions in maxlookback
             injectEdge.incrementValue(tableLevelMaxLookback + 5);
             doMajorCompaction(tableName);
-            expectedCellCount.removeRow(dataRowPosToKey.get(0));
+            // beyond max lookback all the DeleteColumn cells should be purged
+            expectedCellCount.insertRow(dataRowPosToKey.get(0), 2);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey.values());
         }
     }
@@ -366,16 +443,28 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(0, actual);
 
-            // update VAL3 column of row 1
-            updateColumn(conn, 1, "VAL4", injectEdge.currentTime());
+            // update VAL4 column of row 1
+            // This is an update on an expired row so only 2 columns should be visible
+            long currentTime = injectEdge.currentTime();
+            updateColumn(conn, 1, "VAL4", currentTime);
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(1, actual);
+            try (ResultSet rs = readRow(conn, 1)) {
+                assertTrue(rs.next());
+                for (String col : COLUMNS) {
+                    if (!col.equals("VAL4")) {
+                        assertNull(rs.getObject(col));
+                    } else {
+                        assertEquals(currentTime, rs.getTimestamp("VAL4").getTime());
+                    }
+                }
+            }
 
             // advance the time by more than maxlookbackwindow
             injectEdge.incrementValue(tableLevelMaxLookback + 2);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
-            expectedCellCount.insertRow(dataRowPosToKey.get(1), COLUMNS.length + 1);
+            expectedCellCount.insertRow(dataRowPosToKey.get(1), 2);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey.values());
         }
     }
@@ -455,15 +544,27 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
             assertEquals(0, actual);
 
             // update column of row 2
-            updateColumn(conn, 2, ttlCol, new Date(injectEdge.currentTime()));
+            // This is an update on an expired row so only 2 columns should be visible
+            Date d = new Date(injectEdge.currentTime());
+            updateColumn(conn, 2, ttlCol, d);
             actual = TestUtil.getRowCount(conn, tableName, true);
             assertEquals(1, actual);
+            try (ResultSet rs = readRow(conn, 2)) {
+                assertTrue(rs.next());
+                for (String col : COLUMNS) {
+                    if (!col.equals(ttlCol)) {
+                        assertNull(rs.getObject(col));
+                    } else {
+                        assertEquals(d, rs.getDate(ttlCol));
+                    }
+                }
+            }
 
             // advance the time by more than maxlookbackwindow
             injectEdge.incrementValue(tableLevelMaxLookback + 2);
             doMajorCompaction(tableName);
             CellCount expectedCellCount = new CellCount();
-            expectedCellCount.insertRow(dataRowPosToKey.get(2), COLUMNS.length + 1);
+            expectedCellCount.insertRow(dataRowPosToKey.get(2), 2);
             validateTable(conn, tableName, expectedCellCount, dataRowPosToKey.values());
         }
     }

@@ -42,6 +42,7 @@ import java.util.Set;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -178,24 +179,7 @@ public class ConditionalTTLExpression implements TTLExpression {
      * if the expression evaluates to true i.e. row is expired
      */
     public long getRowTTLForMasking(List<Cell> result) {
-        long ttl = DEFAULT_TTL;
-        if (compiledExpr == null) {
-            throw new RuntimeException(
-                    String.format("Conditional TTL Expression %s not compiled", this.ttlExpr));
-        }
-        ImmutableBytesWritable ptr = new ImmutableBytesWritable();
-        List<Cell> latestRowVersion = getLatestRowVersion(result);
-        if (latestRowVersion.isEmpty()) {
-            return ttl;
-        }
-        MultiKeyValueTuple row = new MultiKeyValueTuple(latestRowVersion);
-        if (compiledExpr.evaluate(row, ptr)) {
-            Boolean isExpired = (Boolean) PBoolean.INSTANCE.toObject(ptr);
-            ttl = isExpired ? 0 : DEFAULT_TTL;
-        } else {
-            LOGGER.info("Expression evaluation failed for expr {}", ttlExpr);
-        }
-        return ttl;
+        return isExpired(result) ? 0 : DEFAULT_TTL;
     }
 
     @Override
@@ -208,8 +192,28 @@ public class ConditionalTTLExpression implements TTLExpression {
         return DEFAULT_TTL;
     }
 
+    /**
+     *
+     * @param result
+     * @return
+     */
     public boolean isExpired(List<Cell> result) {
-        return getRowTTLForMasking(result) == 0;
+        if (compiledExpr == null) {
+            throw new RuntimeException(
+                    String.format("Conditional TTL Expression %s not compiled", this.ttlExpr));
+        }
+        ImmutableBytesWritable ptr = new ImmutableBytesWritable();
+        List<Cell> latestRowVersion = getLatestRowVersion(result);
+        if (latestRowVersion.isEmpty()) {
+            return false;
+        }
+        MultiKeyValueTuple row = new MultiKeyValueTuple(latestRowVersion);
+        if (!compiledExpr.evaluate(row, ptr)) {
+            LOGGER.info("Expression evaluation failed for expr {}", ttlExpr);
+            return false;
+        }
+        Object value = PBoolean.INSTANCE.toObject(ptr);
+        return value.equals(Boolean.TRUE);
     }
 
     @Override
@@ -221,6 +225,10 @@ public class ConditionalTTLExpression implements TTLExpression {
                 ttlExpr,
                 exprAndCols.getFirst(),
                 exprAndCols.getSecond());
+    }
+
+    public boolean isMutationEvaluatable(Mutation mutation) {
+        return false;
     }
 
     private Pair<Expression, Set<ColumnReference>> buildExpression(
@@ -252,7 +260,9 @@ public class ConditionalTTLExpression implements TTLExpression {
         return new Pair<>(expr, exprCols);
     }
 
-    // Returns the columns referenced in the ttl expression to be added to scan
+    /**
+     * Returns the columns referenced in the ttl expression to be added to scan
+     */
     public Set<ColumnReference> getColumnsReferenced() {
         if (conditionExprColumns == null) {
             throw new RuntimeException(
