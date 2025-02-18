@@ -169,67 +169,6 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
     }
 
     @Test
-    public void testNulls() throws Exception {
-        int nThreads = 1;//10;
-        final int batchSize = 10; //100;
-        final int nRows = 5;
-        final int nIndexValues = 23;
-        final String tableName = generateUniqueName();
-        final String indexName = generateUniqueName();
-        try (Connection conn = DriverManager.getConnection(getUrl())) {
-            conn.createStatement().execute("CREATE TABLE " + tableName
-                    + "(k1 INTEGER NOT NULL, k2 INTEGER NOT NULL, v1 INTEGER, v2 INTEGER, v3 INTEGER, v4 INTEGER," +
-                    "CONSTRAINT pk PRIMARY KEY (k1,k2))  COLUMN_ENCODED_BYTES = 0, VERSIONS=1, MAX_LOOKBACK_AGE=1000000, TTL='v2 is null and v3 = -1'");
-            /*conn.createStatement().execute("CREATE INDEX " + indexName + " ON "
-                    + tableName + "(v1) INCLUDE(v2, v3)");*/
-            /*for (int i = 0; i < 20; i++) {
-                conn.createStatement().execute(
-                        "UPSERT INTO " + tableName + " VALUES (" + (i % nRows) + ", 0, "
-                                + (RAND.nextBoolean() ? null : (RAND.nextInt() % nIndexValues)) + ", "
-                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ", "
-                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ", "
-                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ")");
-            }
-            conn.commit();
-            for (int i = 0; i < 20; i++) {
-                conn.createStatement().execute(
-                        "UPSERT INTO " + tableName + " VALUES (" + (i % nRows) + ", 0, "
-                                + (RAND.nextBoolean() ? null : (RAND.nextInt() % nIndexValues)) + ", "
-                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ", "
-                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ", "
-                                + (RAND.nextBoolean() ? null : RAND.nextInt()) + ")");
-            }
-            conn.createStatement().execute("DELETE FROM " + tableName + " WHERE k1 = 2");
-             */
-            conn.createStatement().execute(
-                    "UPSERT INTO " + tableName + "(k1, k2, v1, v3) VALUES (2,0, 10, 12)");
-            conn.commit();
-            TestUtil.dumpTable(conn, TableName.valueOf(tableName));
-            String dql = "select v1,v2,v3 from " + tableName;
-            try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
-                assertTrue(rs.next());
-                System.out.println(rs.getInt(1));
-                System.out.println(rs.getInt(2));
-                System.out.println(rs.getInt(3));
-            }
-            conn.createStatement().execute(
-                    "UPSERT INTO " + tableName + "(k1, k2, v2, v3) VALUES (2, 0, null, -1)");
-            conn.commit();
-            TestUtil.dumpTable(conn, TableName.valueOf(tableName));
-            try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
-                while(rs.next()) {
-                    System.out.println(rs.getInt(1));
-                    System.out.println(rs.getInt(2));
-                    System.out.println(rs.getInt(3));
-                }
-            }
-            doMajorCompaction(tableName);
-            //TestUtil.dumpTable(conn, TableName.valueOf(indexName));
-            //IndexScrutiny.scrutinizeIndex(conn, tableName, indexName);
-        }
-    }
-
-    @Test
     public void testBasicMaskingAndCompaction() throws Exception {
         String ttlCol = "VAL5";
         String ttlExpression = String.format("%s=TRUE", ttlCol);
@@ -780,6 +719,56 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
             List<String> rowKeys = Stream.concat(dataRowPosToKey.values().stream(),
                     indexRowPosToKey.values().stream()).collect(Collectors.toList());
             validateTable(conn, fullDataTableName, expectedCellCount, rowKeys);
+        }
+    }
+
+    @Test
+    public void testNulls() throws Exception {
+        if (tableLevelMaxLookback != 0) {
+            return;
+        }
+        String ttlExpression = "VAL2 = -1 AND VAL6 IS NULL";
+        createTable(ttlExpression);
+        String tableName = schemaBuilder.getEntityTableName();
+        injectEdge();
+        int rowCount = 10;
+        long actual;
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            populateTable(conn, rowCount);
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount, actual);
+            for (int i = 0; i < rowCount; ++i) {
+                // all odd rows set VAL6 to null
+                if (i % 2 != 0) {
+                    updateColumn(conn, i, "VAL6", null);
+                }
+            }
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount, actual);
+            for (int i = 0; i < rowCount; ++i) {
+                // all odd rows set VAL2 to -1
+                if (i % 2 != 0) {
+                    updateColumn(conn, i, "VAL2", -1);
+                }
+            }
+            // odd rows should be expired
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount/2, actual);
+
+            // partial update on a row which is expired is treated like a new row
+            updateColumn(conn, 3, "VAL4", null);
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount/2 + 1, actual);
+
+            // Delete an expired row
+            deleteRow(conn, 5);
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount/2 + 1, actual);
+
+            injectEdge.incrementValue(2);
+            doMajorCompaction(tableName);
+            actual = TestUtil.getRowCount(conn, tableName, true);
+            assertEquals(rowCount/2 + 1, actual);
         }
     }
 

@@ -625,6 +625,25 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
       }
   }
 
+  private boolean isDeleteFamilyMutation(Mutation m) throws IOException {
+      boolean result = false;
+      if (! (m instanceof Delete)) {
+          return result;
+      }
+      if (m.isEmpty()) {
+          result = true;
+      } else {
+          CellScanner scanner = m.cellScanner();
+          while (scanner.advance()) {
+              if (scanner.current().getType() == Cell.Type.DeleteFamily) {
+                  result = true;
+                  break;
+              }
+          }
+      }
+      return result;
+  }
+
   private void updateMutationsForConditionalTTL(MiniBatchOperationInProgress<Mutation> miniBatchOp,
                                                 BatchMutateContext context) throws IOException {
 
@@ -637,6 +656,10 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
           }
           Mutation m = miniBatchOp.getOperation(i);
           if (!builder.hasConditionalTTL(m)) {
+              continue;
+          }
+          if (isDeleteFamilyMutation(m)) {
+              // no need to fix DeleteFamily mutation
               continue;
           }
           ImmutableBytesPtr row = new ImmutableBytesPtr(m.getRow());
