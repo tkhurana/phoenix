@@ -709,15 +709,6 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
                           masked = false;
                           break;
                       }
-                      Mutation[] added = miniBatchOp.getOperationsFromCoprocessors(pos);
-                      if (added != null) {
-                          for (Mutation mcoproc : added) {
-                              if (mcoproc.has(cell.getFamilyArray(), cell.getQualifierArray())) {
-                                  masked = false;
-                                  break;
-                              }
-                          }
-                      }
                   }
                   if (masked) {
                       ColumnReference colRef = new ColumnReference(CellUtil.cloneFamily(cell),
@@ -728,14 +719,7 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
           }
           if (!colsToBeMasked.isEmpty()) {
               Mutation m = miniBatchOp.getOperation(positions.get(0));
-              Delete masked;
-              Mutation[] added = miniBatchOp.getOperationsFromCoprocessors(positions.get(0));
-              if (added == null) {
-                  masked = new Delete(m.getRow());
-                  miniBatchOp.addOperationsFromCP(positions.get(0), new Mutation[] {masked});
-              } else {
-                  masked = (Delete) added[0];
-              }
+              Delete masked = new Delete(m.getRow());
               for (ColumnReference col : colsToBeMasked) {
                   KeyValue kv = GenericKeyValueBuilder.INSTANCE.buildDeleteColumns(
                           key,
@@ -744,6 +728,7 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
                           HConstants.LATEST_TIMESTAMP);
                   masked.add(kv);
               }
+              miniBatchOp.addOperationsFromCP(positions.get(0), new Mutation[] {masked});
           }
           // Since the current version has expired update the in-memory state so that
           // this row is treated as a new row

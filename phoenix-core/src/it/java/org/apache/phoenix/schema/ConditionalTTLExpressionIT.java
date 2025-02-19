@@ -773,6 +773,50 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
     }
 
     @Test
+    public void testCaseExpression() throws Exception {
+        if (tableLevelMaxLookback != 0) {
+            return;
+        }
+        String tableName = generateUniqueName();
+        String ttlExpression = "CURRENT_TIME() >= CREATED_TS + " +
+                "CASE WHEN EVENT_TYPE = ''ERROR'' THEN 7 ELSE 1 END";
+        String dql = String.format("CREATE TABLE %s (ID BIGINT NOT NULL PRIMARY KEY, " +
+                "EVENT_TYPE CHAR(15), CREATED_TS TIMESTAMP) COLUMN_ENCODED_BYTES=%d, TTL = '%s'",
+                tableName, columnEncoded ? 2 : 0, ttlExpression);
+        injectEdge();
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            conn.createStatement().execute(dql);
+            conn.commit();
+            int rowCount = 10;
+            String dml = String.format("UPSERT INTO %s VALUES (?, ?, ?)", tableName);
+            try (PreparedStatement ps = conn.prepareStatement(dml)) {
+                for (int i = 0; i < rowCount; ++i) {
+                    ps.setInt(1, i);
+                    ps.setString(2, i % 2 == 0 ? "INFO" : "ERROR");
+                    ps.setTimestamp(3, new Timestamp(injectEdge.currentTime()));
+                    ps.executeUpdate();
+                }
+                conn.commit();
+                long actual = TestUtil.getRowCount(conn, tableName, true);
+                assertEquals(rowCount, actual);
+
+                injectEdge.incrementValue(QueryConstants.MILLIS_IN_DAY);
+                actual = TestUtil.getRowCount(conn, tableName, true);
+                assertEquals(rowCount/2, actual);
+
+                injectEdge.incrementValue(QueryConstants.MILLIS_IN_DAY*6);
+                actual = TestUtil.getRowCount(conn, tableName, true);
+                assertEquals(0, actual);
+
+                injectEdge.incrementValue(1);
+                doMajorCompaction(tableName);
+                actual = TestUtil.getRowCount(conn, tableName, true);
+                assertEquals(0, actual);
+            }
+        }
+    }
+
+    @Test
     public void testBsonDataType() throws Exception {
         String ttlCol = "VAL6";
         String ttlExpression = String.format(
