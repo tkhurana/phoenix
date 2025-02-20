@@ -508,13 +508,12 @@ public class ConditionalTTLExpressionIT extends ParallelStatsDisabledIT {
         }
     }
 
-    @Ignore
+    @Ignore("CURRENT_TIME() doesn't honour scn")
     public void testSCN() throws Exception {
         int ttl = 2000;
         // equivalent to a ttl of 2s
         String ttlExpression = String.format(
                 "TO_NUMBER(CURRENT_TIME()) - TO_NUMBER(PHOENIX_ROW_TIMESTAMP()) >= %d", ttl);
-        ttlExpression = String.format("%d", ttl/1000);
         createTable(ttlExpression);
         createTable(ttlExpression);
         String tableName = schemaBuilder.getEntityTableName();
