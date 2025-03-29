@@ -1,0 +1,10 @@
+Manifest-Version: 1.0
+Implementation-Title: phoenix-microbenchmarks
+Implementation-Version: 5.3.0-SNAPSHOT
+Specification-Vendor: Apache Software Foundation
+Specification-Title: phoenix-microbenchmarks
+Build-Jdk-Spec: 1.8
+Created-By: Maven JAR Plugin 3.3.0
+Specification-Version: 5.3
+Implementation-Vendor: Apache Software Foundation
+
