@@ -3,13 +3,16 @@ package org.apache.phoenix.benchmarks;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.openjdk.jmh.annotations.Benchmark;
+import org.openjdk.jmh.annotations.Mode;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
@@ -18,11 +21,20 @@ import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
 import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
+import org.openjdk.jmh.runner.options.TimeValue;
 
 public class InClauseParsing {
 
     public void parseInQuery(Connection conn, String query) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(query)) {
+            /*ps.setString(1, "org1");
+            ps.setString(2, "dt1");
+            ps.setInt(3, 456);
+            try(ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+
+                }
+            }*/
         }
     }
 
@@ -40,10 +52,10 @@ public class InClauseParsing {
 
         @Setup
         public void prepare() throws SQLException {
-            String url = PhoenixRuntime.JDBC_PROTOCOL + PhoenixRuntime.JDBC_PROTOCOL_SEPARATOR + "localhost";
+            String url = PhoenixRuntime.JDBC_PROTOCOL + PhoenixRuntime.JDBC_PROTOCOL_SEPARATOR + "localhost:2182";
             conn = DriverManager.getConnection(url);
             tableName = "N0001";
-            String ddl = "CREATE TABLE " + tableName + " (" +
+            String ddl = "CREATE TABLE IF NOT EXISTS " + tableName + " (" +
                     " ORGANIZATION_ID CHAR(15) NOT NULL,\n" +
                     " DECISION_TABLE CHAR(15) NOT NULL,\n" +
                     " LAST_REFRESH_DATE BIGINT NOT NULL,\n" +
@@ -74,7 +86,7 @@ public class InClauseParsing {
             query = String.format("" +
                     "SELECT NON_HASHED_INPUT_FIELD_VALUE1,NON_HASHED_OUTPUT_FIELD_VALUE1, HASH_KEY, DECISION_TABLE, LAST_REFRESH_DATE FROM "
                     + tableName + "  WHERE ORGANIZATION_ID=? AND " +
-                    "DECISION_TABLE=? AND LAST_REFRESH_DATE=? AND HASH_KEY IN (%s)", sb);
+                    "DECISION_TABLE=? AND LAST_REFRESH_DATE=? AND HASH_KEY IN %s", hashKeys);
         }
 
         @TearDown
@@ -88,6 +100,12 @@ public class InClauseParsing {
         Options opt = new OptionsBuilder()
                 .include(InClauseParsing.class.getSimpleName())
                 .forks(1)
+                .mode(Mode.AverageTime)
+                .warmupIterations(1)
+                .measurementIterations(1)
+                .warmupTime(TimeValue.milliseconds(5))
+                .measurementTime(TimeValue.milliseconds(50))
+                .timeUnit(TimeUnit.MILLISECONDS)
                 .build();
 
         new Runner(opt).run();
