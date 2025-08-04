@@ -35,6 +35,7 @@ import java.sql.Statement;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.client.replication.ReplicationAdmin;
 import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
 import org.apache.phoenix.exception.SQLExceptionCode;
@@ -79,6 +80,7 @@ public class ParallelPhoenixNullComparingResultSetIT {
       ParallelPhoenixResultSetType.PARALLEL_PHOENIX_NULL_COMPARING_RESULT_SET.getName());
     PROPERTIES.setProperty(ParallelPhoenixUtil.PHOENIX_HA_PARALLEL_OPERATION_TIMEOUT_ATTRIB,
       "3000");
+    PROPERTIES.setProperty(HConstants.HBASE_CLIENT_SCANNER_CACHING, Integer.toString(1));
     // Make first cluster ACTIVE
     CLUSTERS.initClusterRole(haGroupName, PARALLEL);
 
@@ -154,6 +156,27 @@ public class ParallelPhoenixNullComparingResultSetIT {
     readNonExistentRowAndVerify(tableName, intCounter.incrementAndGet());
   }
 
+  @Test
+  public void testOperationUsingConnection() throws Exception {
+    try (Connection conn = getParallelConnection()) {
+      for (int i = 0; i < 10; ++i) {
+        Statement stmt = conn.createStatement();
+        stmt.executeUpdate(String.format("UPSERT INTO %s VALUES(%d, %d)", tableName, i, i % 5));
+      }
+      conn.commit();
+      String ddl = String.format("SELECT id, v FROM %s WHERE id IN (%d, %d, %d, %d) ORDER BY v",
+        tableName, 3, 0, 9, 1);
+      try (ResultSet rs = conn.createStatement().executeQuery(ddl)) {
+        while (rs.next()) {
+          System.out.println(String.format("%d=%d", rs.getInt(1), rs.getInt(2)));
+        }
+      }
+      System.out.println("Closed rs");
+      Thread.sleep(10);
+    }
+    System.out.println("Closed connection");
+  }
+
   private void addRowToCluster1(String tableName, int id, int v) throws SQLException {
     addRowToCluster(CLUSTERS.getURL(1, haGroup.getRoleRecord().getRegistryType()), tableName, id,
       v);
@@ -213,5 +236,9 @@ public class ParallelPhoenixNullComparingResultSetIT {
       }
     }
     assertEquals(1, GLOBAL_HA_PARALLEL_CONNECTION_ERROR_COUNTER.getMetric().getValue());
+  }
+
+  private Connection getParallelConnection() throws SQLException {
+    return DriverManager.getConnection(CLUSTERS.getJdbcHAUrl(), PROPERTIES);
   }
 }

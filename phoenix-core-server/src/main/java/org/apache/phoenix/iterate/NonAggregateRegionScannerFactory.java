@@ -554,11 +554,14 @@ public class NonAggregateRegionScannerFactory extends RegionScannerFactory {
       // Once we return from the first call to next, we've run through and cached
       // the topN rows, so we no longer need to start/stop a region operation.
       firstTuple = iterator.next();
+      LOGGER.info("TopN cached for region {}", region.getRegionInfo().getRegionNameAsString());
       // Now that the topN are cached, we can resize based on the real size
       long actualSize = iterator.getByteSize();
       chunk.resize(actualSize);
     } catch (Throwable t) {
-      ClientUtil.throwIOException(region.getRegionInfo().getRegionNameAsString(), t);
+      String msg = String.format("Error creating topN scanner on %s for iterator %s",
+        region.getRegionInfo().getRegionNameAsString(), iterator);
+      ClientUtil.throwIOException(msg, t);
       return null;
     } finally {
       region.closeRegionOperation();
@@ -620,6 +623,8 @@ public class NonAggregateRegionScannerFactory extends RegionScannerFactory {
             ClientUtil.throwIOException(region.getRegionInfo().getRegionNameAsString(), e);
           } finally {
             chunk.close();
+            LOGGER.info("Releasing chunk for region {}",
+              region.getRegionInfo().getRegionNameAsString());
           }
         }
       }

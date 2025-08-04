@@ -176,10 +176,12 @@ public class ParallelPhoenixNullComparingResultSet extends DelegateResultSet
       this.rs = candidateResult1.getRs().get();
       logIfTraceEnabled(candidateResult1);
       incrementClusterUsedCount(candidateResult1);
+      LOG.info("Binding to ResultSet 1 {}", this.rs);
     } else if (candidate2.isDone() && !candidate2.isCompletedExceptionally() && candidate2.get()) {
       this.rs = candidateResult2.getRs().get();
       logIfTraceEnabled(candidateResult2);
       incrementClusterUsedCount(candidateResult2);
+      LOG.info("Binding to ResultSet 2 {}", this.rs);
     } else {
       throw new SQLException(
         "Unexpected exception, one of the RS should've completed successfully");
@@ -214,6 +216,7 @@ public class ParallelPhoenixNullComparingResultSet extends DelegateResultSet
   public void close() throws SQLException {
     Function<ResultSet, Void> function = (T) -> {
       try {
+        LOG.info("Closing resultset {}", T);
         T.close();
         return null;
       } catch (SQLException exception) {
