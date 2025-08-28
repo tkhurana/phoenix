@@ -18,7 +18,10 @@
 package org.apache.phoenix.replication;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.phoenix.replication.log.LogFileWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,39 +46,33 @@ import org.slf4j.LoggerFactory;
 public class StoreAndForwardLogGroupWriter extends ReplicationLogGroupWriter {
 
     private static final Logger LOG = LoggerFactory.getLogger(StoreAndForwardLogGroupWriter.class);
+    private static final String WRITER = "STORE_AND_FORWARD";
 
     /**
      * Constructor for StoreAndForwardLogGroupWriter.
      */
     public StoreAndForwardLogGroupWriter(ReplicationLogGroup logGroup) {
         super(logGroup);
-        LOG.debug("Created StoreAndForwardLogGroupWriter for HA Group: {}",
-            logGroup.getHaGroupName());
+        LOG.debug("Created StoreAndForwardLogGroupWriter for HA Group: {}", logGroup);
     }
 
     @Override
-    public void init() throws IOException {
-        // TODO
+    public String toString() {
+        return WRITER;
     }
 
     @Override
-    public void close() {
-        // TODO
-    }
-
-    @Override
-    protected void initializeFileSystems() throws IOException {
-        // TODO
-    }
-
-    @Override
-    protected void initializeReplicationShardDirectoryManager() {
-        // TODO
-    }
-
-    @Override
-    protected LogFileWriter createNewWriter() throws IOException {
-        // TODO
-        return null;
+    protected URI getLogURI() throws IOException {
+        Configuration conf = logGroup.getConfiguration();
+        String fallbackUrlString = conf.get(ReplicationLogGroup.REPLICATION_FALLBACK_HDFS_URL_KEY);
+        if (fallbackUrlString == null || fallbackUrlString.trim().isEmpty()) {
+            throw new IOException("Fallback HDFS URL not configured: "
+                    + ReplicationLogGroup.REPLICATION_FALLBACK_HDFS_URL_KEY);
+        }
+        try {
+            return new URI(fallbackUrlString);
+        } catch (URISyntaxException e) {
+            throw new IOException("Invalid fallback HDFS URL: " + fallbackUrlString, e);
+        }
     }
 }

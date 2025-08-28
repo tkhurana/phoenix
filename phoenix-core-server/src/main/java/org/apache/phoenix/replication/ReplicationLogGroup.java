@@ -212,6 +212,11 @@ public class ReplicationLogGroup {
         return serverName;
     }
 
+    @Override
+    public String toString() {
+        return getHaGroupName();
+    }
+
     /**
      * Append a mutation to the replication log group. This operation is normally non-blocking
      * unless the ring buffer is full.

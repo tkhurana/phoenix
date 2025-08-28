@@ -23,6 +23,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -33,9 +34,12 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.phoenix.replication.log.LogFileWriter;
+import org.apache.phoenix.replication.log.LogFileWriterContext;
+import org.apache.phoenix.replication.reader.ReplicationLogReplayFileTracker;
 import org.apache.phoenix.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.slf4j.Logger;
@@ -117,6 +121,9 @@ public abstract class ReplicationLogGroupWriter {
     protected final int ringBufferSize;
     protected final long syncTimeoutMs;
     protected final ReentrantLock lock = new ReentrantLock();
+    protected URI logURI;
+    protected FileSystem logFs;
+    private Path haGroupLogFilesPath;
     protected volatile LogFileWriter currentWriter;
     protected final AtomicLong lastRotationTime = new AtomicLong();
     protected final AtomicLong writerGeneration = new AtomicLong();
@@ -126,6 +133,7 @@ public abstract class ReplicationLogGroupWriter {
     protected RingBuffer<LogEvent> ringBuffer;
     protected volatile boolean closed = false;
     protected ReplicationShardDirectoryManager replicationShardDirectoryManager;
+    private final ConcurrentHashMap<Path, Object> shardMap = new ConcurrentHashMap<>();
 
     /** The reason for requesting a log rotation. */
     protected enum RotationReason {
@@ -175,6 +183,7 @@ public abstract class ReplicationLogGroupWriter {
             ReplicationLogGroup.DEFAULT_REPLICATION_LOG_SYNC_TIMEOUT);
     }
 
+
     /** Initialize the writer. */
     public void init() throws IOException {
         initializeFileSystems();
@@ -185,6 +194,40 @@ public abstract class ReplicationLogGroupWriter {
         // Create the initial writer. Do this before we initialize the Disruptor.
         currentWriter = createNewWriter();
         initializeDisruptor();
+    }
+
+    /** Initialize file systems needed by the writer. */
+    protected void initializeFileSystems() throws IOException {
+        this.logURI = getLogURI();
+        this.logFs = getFileSystem(logURI);
+        LOG.info("Initialized writer {} at filesystem: {}", this, logURI);
+    }
+
+    /** Initialize the Disruptor. */
+    @SuppressWarnings("unchecked")
+    protected void initializeDisruptor() throws IOException {
+        disruptor = new Disruptor<>(LogEvent.EVENT_FACTORY, ringBufferSize,
+                new ThreadFactoryBuilder()
+                        .setNameFormat("ReplicationLogGroupWriter-" + logGroup.getHaGroupName() + "-%d")
+                        .setDaemon(true).build(),
+                ProducerType.MULTI, new YieldingWaitStrategy());
+        LogEventHandler eventHandler = new LogEventHandler();
+        eventHandler.init();
+        disruptor.handleEventsWith(eventHandler);
+        LogExceptionHandler exceptionHandler = new LogExceptionHandler();
+        disruptor.setDefaultExceptionHandler(exceptionHandler);
+        ringBuffer = disruptor.start();
+    }
+
+    /**
+     * Initialize the {@link ReplicationShardDirectoryManager} to manage file to shard directory
+     * mapping
+     */
+    protected void initializeReplicationShardDirectoryManager() {
+        this.haGroupLogFilesPath = new Path(new Path(logURI.getPath(), logGroup.getHaGroupName()),
+                ReplicationLogReplayFileTracker.IN_SUBDIRECTORY);
+        this.replicationShardDirectoryManager = new ReplicationShardDirectoryManager(
+                logGroup.getConfiguration(), haGroupLogFilesPath);
     }
 
     /**
@@ -248,34 +291,56 @@ public abstract class ReplicationLogGroupWriter {
         syncInternal();
     }
 
-    /** Initialize file systems needed by this writer implementation. */
-    protected abstract void initializeFileSystems() throws IOException;
+    /**
+     *
+     * @return the URI where the logs are stored
+     */
+    protected abstract URI getLogURI() throws IOException;
 
     /**
-     * Initialize the {@link ReplicationShardDirectoryManager} to manage file to shard directory
-     * mapping
+     * Creates a new log file path in a sharded directory structure using
+     * {@link ReplicationShardDirectoryManager}.
+     * Directory Structure: [root_path]/[ha_group_name]/in/shard/[shard_directory]/[file_name]
      */
-    protected abstract void initializeReplicationShardDirectoryManager();
+    protected Path makeWriterPath(FileSystem fs) throws IOException {
+        long timestamp = EnvironmentEdgeManager.currentTimeMillis();
+        Path shardPath = replicationShardDirectoryManager.getShardDirectory(timestamp);
+        // Ensure the shard directory exists. We track which shard directories we have probed or
+        // created to avoid a round trip to the namenode for repeats.
+        IOException[] exception = new IOException[1];
+        shardMap.computeIfAbsent(shardPath, p -> {
+            try {
+                if (!fs.exists(p)) {
+                    fs.mkdirs(haGroupLogFilesPath); // This probably exists, but just in case.
+                    if (!fs.mkdirs(shardPath)) {
+                        throw new IOException("Could not create path: " + p);
+                    }
+                }
+            } catch (IOException e) {
+                exception[0] = e;
+                return null; // Don't cache the path if we can't create it.
+            }
+            return p;
+        });
+        // If we faced an exception in computeIfAbsent, throw it
+        if (exception[0] != null) {
+            throw exception[0];
+        }
+        Path filePath = new Path(shardPath, String.format(ReplicationLogGroup.FILE_NAME_FORMAT,
+                timestamp, logGroup.getServerName()));
+        return filePath;
+    }
 
-    /**
-     * Create a new log writer for rotation.
-     */
-    protected abstract LogFileWriter createNewWriter() throws IOException;
-
-    /** Initialize the Disruptor. */
-    @SuppressWarnings("unchecked")
-    protected void initializeDisruptor() throws IOException {
-        disruptor = new Disruptor<>(LogEvent.EVENT_FACTORY, ringBufferSize,
-            new ThreadFactoryBuilder()
-                .setNameFormat("ReplicationLogGroupWriter-" + logGroup.getHaGroupName() + "-%d")
-                .setDaemon(true).build(),
-            ProducerType.MULTI, new YieldingWaitStrategy());
-        LogEventHandler eventHandler = new LogEventHandler();
-        eventHandler.init();
-        disruptor.handleEventsWith(eventHandler);
-        LogExceptionHandler exceptionHandler = new LogExceptionHandler();
-        disruptor.setDefaultExceptionHandler(exceptionHandler);
-        ringBuffer = disruptor.start();
+    /** Creates and initializes a new LogFileWriter. */
+    protected LogFileWriter createNewWriter() throws IOException {
+        Path filePath = makeWriterPath(this.logFs);
+        LogFileWriterContext writerContext = new LogFileWriterContext(logGroup.getConfiguration())
+                .setFileSystem(this.logFs)
+                .setFilePath(filePath).setCompression(compression);
+        LogFileWriter newWriter = new LogFileWriter();
+        newWriter.init(writerContext);
+        newWriter.setGeneration(writerGeneration.incrementAndGet());
+        return newWriter;
     }
 
     /**

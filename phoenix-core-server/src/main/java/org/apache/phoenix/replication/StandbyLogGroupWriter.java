@@ -43,88 +43,33 @@ import org.slf4j.LoggerFactory;
 public class StandbyLogGroupWriter extends ReplicationLogGroupWriter {
 
     private static final Logger LOG = LoggerFactory.getLogger(StandbyLogGroupWriter.class);
-
-    private FileSystem standbyFs;
-    private URI standbyUrl;
-    private Path haGroupLogFilesPath;
-    protected final ConcurrentHashMap<Path, Object> shardMap = new ConcurrentHashMap<>();
+    private static final String WRITER = "STANDBY";
 
     /**
      * Constructor for StandbyLogGroupWriter.
      */
     public StandbyLogGroupWriter(ReplicationLogGroup logGroup) {
         super(logGroup);
-        LOG.debug("Created StandbyLogGroupWriter for HA Group: {}", logGroup.getHaGroupName());
+        LOG.debug("Created StandbyLogGroupWriter for HA Group: {}", logGroup);
     }
 
     @Override
-    protected void initializeFileSystems() throws IOException {
+    public String toString() {
+        return WRITER;
+    }
+
+    @Override
+    protected URI getLogURI() throws IOException {
         Configuration conf = logGroup.getConfiguration();
         String standbyUrlString = conf.get(ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY);
         if (standbyUrlString == null || standbyUrlString.trim().isEmpty()) {
             throw new IOException("Standby HDFS URL not configured: "
-                + ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY);
+                    + ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY);
         }
         try {
-            standbyUrl = new URI(standbyUrlString);
-            standbyFs = getFileSystem(standbyUrl);
-            LOG.info("Initialized standby filesystem: {}", standbyUrl);
+            return new URI(standbyUrlString);
         } catch (URISyntaxException e) {
             throw new IOException("Invalid standby HDFS URL: " + standbyUrlString, e);
         }
-    }
-
-    @Override
-    protected void initializeReplicationShardDirectoryManager() {
-        this.haGroupLogFilesPath = new Path(new Path(standbyUrl.getPath(), logGroup.getHaGroupName()), 
-            ReplicationLogReplayFileTracker.IN_SUBDIRECTORY);
-        this.replicationShardDirectoryManager = new ReplicationShardDirectoryManager(
-            logGroup.getConfiguration(), haGroupLogFilesPath);
-    }
-
-    /**
-     * Creates a new log file path in a sharded directory structure using 
-     * {@link ReplicationShardDirectoryManager}.
-     * Directory Structure: [root_path]/[ha_group_name]/in/shard/[shard_directory]/[file_name]
-     */
-    protected Path makeWriterPath(FileSystem fs) throws IOException {
-        long timestamp = EnvironmentEdgeManager.currentTimeMillis();
-        Path shardPath = replicationShardDirectoryManager.getShardDirectory(timestamp);
-        // Ensure the shard directory exists. We track which shard directories we have probed or
-        // created to avoid a round trip to the namenode for repeats.
-        IOException[] exception = new IOException[1];
-        shardMap.computeIfAbsent(shardPath, p -> {
-            try {
-                if (!fs.exists(p)) {
-                    fs.mkdirs(haGroupLogFilesPath); // This probably exists, but just in case.
-                    if (!fs.mkdirs(shardPath)) {
-                        throw new IOException("Could not create path: " + p);
-                    }
-                }
-            } catch (IOException e) {
-                exception[0] = e;
-                return null; // Don't cache the path if we can't create it.
-            }
-            return p;
-        });
-        // If we faced an exception in computeIfAbsent, throw it
-        if (exception[0] != null) {
-            throw exception[0];
-        }
-        Path filePath = new Path(shardPath, String.format(ReplicationLogGroup.FILE_NAME_FORMAT,
-            timestamp, logGroup.getServerName()));
-        return filePath;
-    }
-
-    /** Creates and initializes a new LogFileWriter. */
-    protected LogFileWriter createNewWriter() throws IOException {
-        Path filePath = makeWriterPath(standbyFs);
-        LogFileWriterContext writerContext = new LogFileWriterContext(logGroup.getConfiguration())
-            .setFileSystem(standbyFs)
-            .setFilePath(filePath).setCompression(compression);
-        LogFileWriter newWriter = new LogFileWriter();
-        newWriter.init(writerContext);
-        newWriter.setGeneration(writerGeneration.incrementAndGet());
-        return newWriter;
     }
 }

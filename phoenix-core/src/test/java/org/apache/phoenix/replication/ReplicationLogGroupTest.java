@@ -76,12 +76,15 @@ public class ReplicationLogGroupTest {
     private static final Logger LOG = LoggerFactory.getLogger(ReplicationLogGroupTest.class);
 
     @ClassRule
-    public static TemporaryFolder testFolder = new TemporaryFolder();
+    public static TemporaryFolder standbyFolder = new TemporaryFolder();
+    @ClassRule
+    public static TemporaryFolder fallbackFolder = new TemporaryFolder();
 
     private Configuration conf;
     private ServerName serverName;
     private FileSystem localFs;
     private URI standbyUri;
+    private URI fallbackUri;
     private ReplicationLogGroup logGroup;
 
     static final int TEST_RINGBUFFER_SIZE = 32;
@@ -93,9 +96,11 @@ public class ReplicationLogGroupTest {
     public void setUp() throws IOException {
         conf = HBaseConfiguration.create();
         localFs = FileSystem.getLocal(conf);
-        standbyUri = new Path(testFolder.getRoot().toString()).toUri();
+        standbyUri = new Path(standbyFolder.getRoot().toString()).toUri();
+        fallbackUri = new Path(fallbackFolder.getRoot().toString()).toUri();
         serverName = ServerName.valueOf("test", 60010, EnvironmentEdgeManager.currentTimeMillis());
         conf.set(ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY, standbyUri.toString());
+        conf.set(ReplicationLogGroup.REPLICATION_FALLBACK_HDFS_URL_KEY, fallbackUri.toString());
         // Small ring buffer size for testing
         conf.setInt(ReplicationLogGroup.REPLICATION_LOG_RINGBUFFER_SIZE_KEY, TEST_RINGBUFFER_SIZE);
         // Set a short sync timeout for testing
