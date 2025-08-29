@@ -17,17 +17,15 @@
  */
 package org.apache.phoenix.replication;
 
+import static org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode.STORE_AND_FORWARD;
+
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.phoenix.replication.log.LogFileWriter;
-import org.apache.phoenix.replication.log.LogFileWriterContext;
-import org.apache.phoenix.util.EnvironmentEdgeManager;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,5 +67,17 @@ public class StandbyLogGroupWriter extends ReplicationLogGroupWriter {
         } catch (URISyntaxException e) {
             throw new IOException("Invalid standby HDFS URL: " + standbyUrlString, e);
         }
+    }
+
+    @Override
+    protected boolean onFailure(List<Record> currentBatch, Throwable reason) throws IOException {
+        // when the standby writer fails, first switch mode
+        logGroup.switchMode(STORE_AND_FORWARD, reason);
+        // replay the in-flight appends which will go to the new writer since we switched the mode
+        for (Record record : currentBatch) {
+            logGroup.append(record.tableName, record.commitId, record.mutation);
+        }
+        // Return true to stop processing other events
+        return true;
     }
 }

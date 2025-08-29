@@ -20,9 +20,9 @@ package org.apache.phoenix.replication;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.phoenix.replication.log.LogFileWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,5 +74,10 @@ public class StoreAndForwardLogGroupWriter extends ReplicationLogGroupWriter {
         } catch (URISyntaxException e) {
             throw new IOException("Invalid fallback HDFS URL: " + fallbackUrlString, e);
         }
+    }
+
+    @Override
+    protected boolean onFailure(List<Record> currentBatch, Throwable reason) throws IOException {
+        return false;
     }
 }
