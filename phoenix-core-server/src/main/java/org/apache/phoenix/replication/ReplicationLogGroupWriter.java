@@ -298,6 +298,16 @@ public abstract class ReplicationLogGroupWriter {
     protected abstract URI getLogURI() throws IOException;
 
     /**
+     * Take writer specific action when an append/sync event fails
+     * @param currentBatch The batch of append records that were in-flight and not synced yet
+     * @param e The exception that caused the failure
+     * @return True, if stop processing further events on the writer.
+     *         False, if processing should continue on the writer
+     * @throws IOException
+     */
+    protected abstract boolean onFailure(List<Record> currentBatch, Throwable e) throws IOException;
+
+    /**
      * Creates a new log file path in a sharded directory structure using
      * {@link ReplicationShardDirectoryManager}.
      * Directory Structure: [root_path]/[ha_group_name]/in/shard/[shard_directory]/[file_name]
@@ -693,6 +703,11 @@ public abstract class ReplicationLogGroupWriter {
         protected final List<CompletableFuture<Void>> pendingSyncFutures = new ArrayList<>();
         protected LogFileWriter writer;
         protected long generation;
+        /**
+         * Set if we get an exception appending or syncing so that all subsequence appends and syncs on
+         * this writer will fail immediately.
+         */
+        private Exception exception = null;
 
         protected LogEventHandler() {
             Configuration conf = logGroup.getConfiguration();
@@ -839,6 +854,7 @@ public abstract class ReplicationLogGroupWriter {
                     // IO exception, force a rotation.
                     LOG.debug("Attempt " + (attempt + 1) + "/" + maxRetries + " failed", e);
                     if (attempt >= maxRetries) {
+                        onFailure(currentBatch, e);
                         failPendingSyncs(sequence, e);
                         throw e;
                     }
