@@ -18,11 +18,19 @@
 package org.apache.phoenix.replication;
 
 import java.io.IOException;
+import java.sql.SQLException;
+import java.util.EnumSet;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableMap;
+import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
+import org.apache.phoenix.exception.InvalidClusterRoleTransitionException;
+import org.apache.phoenix.exception.StaleHAGroupStoreRecordVersionException;
+import org.apache.phoenix.jdbc.HAGroupStoreManager;
 import org.apache.phoenix.replication.metrics.MetricsReplicationLogGroupSource;
 import org.apache.phoenix.replication.metrics.MetricsReplicationLogGroupSourceImpl;
 import org.slf4j.Logger;
@@ -141,6 +149,14 @@ public class ReplicationLogGroup {
         SYNC_AND_FORWARD;
     }
 
+    private static final ImmutableMap<ReplicationMode,
+            EnumSet<ReplicationMode>> allowedTransition = Maps.immutableEnumMap(ImmutableMap.of(
+                    ReplicationMode.SYNC,
+                    EnumSet.of(ReplicationMode.STORE_AND_FORWARD),
+                    ReplicationMode.STORE_AND_FORWARD,
+                    EnumSet.of(ReplicationMode.SYNC_AND_FORWARD),
+                    ReplicationMode.SYNC_AND_FORWARD,
+                    EnumSet.of(ReplicationMode.SYNC, ReplicationMode.STORE_AND_FORWARD)));
     /**
      * Get or create a ReplicationLogGroup instance for the given HA Group.
      *
@@ -359,18 +375,42 @@ public class ReplicationLogGroup {
     /**
      * Switch the replication mode.
      *
-     * @param mode The new replication mode
+     * @param newMode The new replication mode
      * @param reason The reason for the mode switch
      * @throws IOException If the mode switch fails
      */
-    public void switchMode(ReplicationMode mode, Throwable reason) throws IOException {
-        // TODO: Implement mode switching guardrails and transition logic.
-        // TODO: We will be interacting with the HA Group Store to switch modes.
+    public void switchMode(ReplicationMode newMode, Throwable reason) throws IOException {
+        if (mode.equals(newMode)) {
+            LOG.info("HA group {} is already in new mode {}", this, newMode);
+            return;
+        }
+        EnumSet<ReplicationMode> allowedToStates = allowedTransition.get(this.mode);
+        if (allowedToStates == null || !allowedToStates.contains(newMode)) {
+            throw new DoNotRetryIOException("Can not transit HA Group " + haGroupName +
+                    " mode from " + this.mode + " to " + newMode);
+        }
 
-        // TODO: Drain the disruptor ring from the remote writer to the local writer when making
-        // transitions from SYNC or SYNC_AND_FORWARD to STORE_AND_FORWARD.
+        LOG.info("Attempting to switch replication mode for HA Group: {} from {} to {} because {}",
+                this, this.mode, newMode, reason);
 
-        throw new UnsupportedOperationException("Mode switching is not implemented");
+        HAGroupStoreManager haGroupStoreManager = HAGroupStoreManager.getInstance(conf);
+
+        switch (mode) {
+            case SYNC:
+                // SYNC -> STORE_AND_FORWARD
+                try {
+                    haGroupStoreManager.setHAGroupStatusToStoreAndForward(haGroupName);
+                } catch (IOException e) {
+                    throw e;
+                }
+                catch (Exception e) {
+                    throw new IOException(e);
+                }
+                break;
+        }
+
+        LOG.info("Switched replication mode for HA Group: {} from {} to {}",
+                this, this.mode, newMode);
     }
 
     /** Get the current metrics source for monitoring operations. */

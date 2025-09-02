@@ -34,6 +34,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.net.URI;
@@ -196,6 +197,35 @@ public class ReplicationLogGroupTest {
       inOrder.verify(writerAfterRoll, times(1))
           .append(eq(tableName), eq(commitId), eq(put)); // Replay
       inOrder.verify(writerAfterRoll, times(1)).sync(); // Succeeded
+    }
+
+    /**
+     * Tests the behavior when a sync operation fails multiple times until all the
+     * attempts are exhausted
+     */
+    @Test
+    public void testSyncFailureRetriesExhausted() throws Exception {
+        final String tableName = "TBLSFR";
+        final long commitId = 1L;
+        final Mutation put = LogFileTestUtil.newPut("row", 1, 1);
+
+        ReplicationLogGroupWriter activeWriter = logGroup.getActiveWriter();
+        // Get the initial inner writer
+        LogFileWriter initialWriter = activeWriter.getWriter();
+        assertNotNull("Initial writer should not be null", initialWriter);
+        // always return the same writer on every roll so that we can simulate failure
+        // on all retries
+        when(activeWriter.createNewWriter()).thenReturn(initialWriter);
+        // Configure writer to fail on all sync calls
+        doThrow(new IOException("Simulated sync failure")).when(initialWriter).sync();
+
+        logGroup.append(tableName, commitId, put);
+        try {
+            logGroup.sync();
+            fail("Should have thrown IOException because sync should have failed");
+        } catch (IOException e) {
+            assertTrue(e.getMessage().contains("Simulated sync failure"));
+        }
     }
 
     /**
@@ -1249,6 +1279,13 @@ public class ReplicationLogGroupTest {
             return writer;
         }
 
+        @Override
+        protected ReplicationLogGroupWriter createLocalWriter() throws IOException {
+            ReplicationLogGroupWriter writer = spy(new TestableStoreAndForwardLogGroupWriter(this));
+            writer.init();
+            return writer;
+        }
+
     }
 
     /**
@@ -1257,6 +1294,22 @@ public class ReplicationLogGroupTest {
     static class TestableStandbyLogGroupWriter extends StandbyLogGroupWriter {
 
         protected TestableStandbyLogGroupWriter(ReplicationLogGroup logGroup) {
+            super(logGroup);
+        }
+
+        @Override
+        protected LogFileWriter createNewWriter() throws IOException {
+            LogFileWriter writer = super.createNewWriter();
+            return spy(writer);
+        }
+    }
+
+    /**
+     * Testable version of StoreAndForwardLogGroupWriter that allows spying on writers.
+     */
+    static class TestableStoreAndForwardLogGroupWriter extends StoreAndForwardLogGroupWriter {
+
+        protected TestableStoreAndForwardLogGroupWriter(ReplicationLogGroup logGroup) {
             super(logGroup);
         }
 
