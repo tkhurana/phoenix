@@ -18,9 +18,16 @@
 package org.apache.phoenix.replication;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
@@ -31,10 +38,20 @@ import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
 import org.apache.phoenix.exception.InvalidClusterRoleTransitionException;
 import org.apache.phoenix.exception.StaleHAGroupStoreRecordVersionException;
 import org.apache.phoenix.jdbc.HAGroupStoreManager;
+import org.apache.phoenix.replication.log.LogFileWriter;
 import org.apache.phoenix.replication.metrics.MetricsReplicationLogGroupSource;
 import org.apache.phoenix.replication.metrics.MetricsReplicationLogGroupSourceImpl;
+import org.apache.phoenix.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.lmax.disruptor.EventFactory;
+import com.lmax.disruptor.EventHandler;
+import com.lmax.disruptor.ExceptionHandler;
+import com.lmax.disruptor.RingBuffer;
+import com.lmax.disruptor.YieldingWaitStrategy;
+import com.lmax.disruptor.dsl.Disruptor;
+import com.lmax.disruptor.dsl.ProducerType;
 
 /**
  * ReplicationLogGroup manages a group of replication logs for a given HA Group.
@@ -103,11 +120,47 @@ public class ReplicationLogGroup {
     protected final Configuration conf;
     protected final ServerName serverName;
     protected final String haGroupName;
+    protected final MetricsReplicationLogGroupSource metrics;
+    protected long syncTimeoutMs;
     protected ReplicationLogGroupWriter remoteWriter;
     protected ReplicationLogGroupWriter localWriter;
     protected ReplicationMode mode;
     protected volatile boolean closed = false;
-    protected final MetricsReplicationLogGroupSource metrics;
+
+    protected static class Record {
+        public String tableName;
+        public long commitId;
+        public Mutation mutation;
+
+        public Record(String tableName, long commitId, Mutation mutation) {
+            this.tableName = tableName;
+            this.commitId = commitId;
+            this.mutation = mutation;
+        }
+    }
+
+    /** Event structure for the Disruptor ring buffer containing data and sync operations. */
+    protected static class LogEvent {
+        protected static final EventFactory<LogEvent> EVENT_FACTORY = LogEvent::new;
+
+        protected int type;
+        protected Record record;
+        protected CompletableFuture<Void> syncFuture; // Used only for SYNC events
+        protected long timestampNs; // Timestamp when event was created
+
+        public static final byte EVENT_TYPE_DATA = 0;
+        public static final byte EVENT_TYPE_SYNC = 1;
+
+        public void setValues(int type, Record record, CompletableFuture<Void> syncFuture) {
+            this.type = type;
+            this.record = record;
+            this.syncFuture = syncFuture;
+            this.timestampNs = System.nanoTime();
+        }
+    }
+
+    protected Disruptor<LogEvent> disruptor;
+    protected RingBuffer<LogEvent> ringBuffer;
 
     /**
      * Tracks the current replication mode of the ReplicationLog.
@@ -157,6 +210,7 @@ public class ReplicationLogGroup {
                     EnumSet.of(ReplicationMode.SYNC_AND_FORWARD),
                     ReplicationMode.SYNC_AND_FORWARD,
                     EnumSet.of(ReplicationMode.SYNC, ReplicationMode.STORE_AND_FORWARD)));
+
     /**
      * Get or create a ReplicationLogGroup instance for the given HA Group.
      *
@@ -208,7 +262,62 @@ public class ReplicationLogGroup {
         remoteWriter = createRemoteWriter();
         // TODO: Switch the initial mode to STORE_AND_FORWARD if the remote writer fails to
         // initialize.
-        LOG.info("Started ReplicationLogGroup for HA Group: {}", haGroupName);
+        this.syncTimeoutMs = conf.getLong(ReplicationLogGroup.REPLICATION_LOG_SYNC_TIMEOUT_KEY,
+                ReplicationLogGroup.DEFAULT_REPLICATION_LOG_SYNC_TIMEOUT);
+        initializeDisruptor();
+        LOG.info("Started ReplicationLogGroup for HA Group: {}", this);
+    }
+
+    /** Initialize the Disruptor. */
+    @SuppressWarnings("unchecked")
+    protected void initializeDisruptor() throws IOException {
+        int ringBufferSize = conf.getInt(REPLICATION_LOG_RINGBUFFER_SIZE_KEY,
+                DEFAULT_REPLICATION_LOG_RINGBUFFER_SIZE);
+        disruptor = new Disruptor<>(LogEvent.EVENT_FACTORY, ringBufferSize,
+                new ThreadFactoryBuilder()
+                        .setNameFormat("ReplicationLogGroup-" + getHaGroupName() + "-%d")
+                        .setDaemon(true).build(),
+                ProducerType.MULTI, new YieldingWaitStrategy());
+        LogEventHandler eventHandler = new LogEventHandler();
+        disruptor.handleEventsWith(eventHandler);
+        LogExceptionHandler exceptionHandler = new LogExceptionHandler();
+        disruptor.setDefaultExceptionHandler(exceptionHandler);
+        ringBuffer = disruptor.start();
+    }
+
+    /**
+     * Handles events from the Disruptor, managing batching, writer rotation, and error handling.
+     */
+    protected class LogEventHandler implements EventHandler<LogEvent> {
+
+        @Override
+        public void onEvent(LogEvent event, long sequence, boolean endOfBatch) throws Exception {
+
+        }
+    }
+
+    /**
+     * Handler for critical errors during the Disruptor lifecycle that closes the writer to prevent
+     * data loss.
+     */
+    protected class LogExceptionHandler implements ExceptionHandler<LogEvent> {
+        @Override
+        public void handleEventException(Throwable e, long sequence, LogEvent event) {
+            String message = "Exception processing sequence " + sequence + "  for event " + event;
+            LOG.error(message, e);
+
+        }
+
+        @Override
+        public void handleOnStartException(Throwable e) {
+            LOG.error("Exception during Disruptor startup", e);
+        }
+
+        @Override
+        public void handleOnShutdownException(Throwable e) {
+            // Should not happen, but if it does, the regionserver is aborting or shutting down.
+            LOG.error("Exception during Disruptor shutdown", e);
+        }
     }
 
     /**
@@ -234,53 +343,40 @@ public class ReplicationLogGroup {
     }
 
     /**
-     * Append a mutation to the replication log group. This operation is normally non-blocking
-     * unless the ring buffer is full.
+     * Append a mutation to the log. This method is non-blocking and returns quickly, unless the
+     * ring buffer is full. The actual write happens asynchronously. We expect multiple append()
+     * calls followed by a sync(). The appends will be batched by the Disruptor. Should the ring
+     * buffer become full, which is not expected under normal operation but could (and should)
+     * happen if the log file writer is unable to make progress, due to a HDFS level disruption.
+     * Should we enter that condition this method will block until the append can be inserted.
+     * <p>
+     * An internal error may trigger fail-stop behavior. Subsequent to fail-stop, this method will
+     * throw an IOException("Closed"). No further appends are allowed.
      *
-     * @param tableName The name of the HBase table the mutation applies to
-     * @param commitId The commit identifier (e.g., SCN) associated with the mutation
-     * @param mutation The HBase Mutation (Put or Delete) to be logged
-     * @throws IOException If the operation fails
+     * @param tableName The name of the HBase table the mutation applies to.
+     * @param commitId  The commit identifier (e.g., SCN) associated with the mutation.
+     * @param mutation  The HBase Mutation (Put or Delete) to be logged.
+     * @throws IOException If the writer is closed or if the ring buffer is full.
      */
     public void append(String tableName, long commitId, Mutation mutation) throws IOException {
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("Append: table={}, commitId={}, mutation={}", tableName, commitId, mutation);
+        }
         if (closed) {
             throw new IOException("Closed");
         }
         long startTime = System.nanoTime();
         try {
-            switch (mode) {
-            case SYNC:
-                // In sync mode, we only write to the remote writer.
-                try {
-                    remoteWriter.append(tableName, commitId, mutation);
-                } catch (IOException e) {
-                    // TODO: If the remote writer fails, we must switch to store and forward.
-                    LOG.warn("Mode switching not implemented");
-                    throw e;
-                }
-                break;
-            case SYNC_AND_FORWARD:
-                // In sync and forward mode, we write to only the remote writer, while in the
-                // background we are draining the local queue.
-                try {
-                    remoteWriter.append(tableName, commitId, mutation);
-                } catch (IOException e) {
-                    // TODO: If the remote writer fails again, we must switch back to store and
-                    // forward.
-                    LOG.warn("Mode switching not implemented");
-                    throw e;
-                }
-                break;
-            case STORE_AND_FORWARD:
-                // In store and forward mode, we append to the local writer. If we fail it's a
-                // critical failure.
-                localWriter.append(tableName, commitId, mutation);
-                // TODO: Probe the state of the remoteWriter. Can we switch back?
-                // TODO: This suggests the ReplicationLogGroupWriter interface should have a status
-                // probe API.
-                break;
-            default:
-                throw new IllegalStateException("Invalid replication mode: " + mode);
+            // ringBuffer.next() claims the next sequence number. Because we initialize the Disruptor
+            // with ProducerType.MULTI and the blocking YieldingWaitStrategy this call WILL BLOCK if
+            // the ring buffer is full, thus providing backpressure to the callers.
+            long sequence = ringBuffer.next();
+            try {
+                LogEvent event = ringBuffer.get(sequence);
+                event.setValues(LogEvent.EVENT_TYPE_DATA, new Record(tableName, commitId, mutation), null);
+            } finally {
+                // Update ring buffer events metric
+                ringBuffer.publish(sequence);
             }
         } finally {
             metrics.updateAppendTime(System.nanoTime() - startTime);
@@ -288,53 +384,66 @@ public class ReplicationLogGroup {
     }
 
     /**
-     * Ensure all previously appended records are durably persisted. This method blocks until the
-     * sync operation completes or fails.
-     *
-     * @throws IOException If the sync operation fails
+     * Ensures all previously appended records are durably persisted. This method blocks until the
+     * sync operation completes or fails, potentially after internal retries. All in flight appends
+     * are batched and provided to the underlying LogWriter, which will then be synced. If there is
+     * a problem syncing the LogWriter we will retry, up to the retry limit, rolling the writer for
+     * each retry.
+     * <p>
+     * An internal error may trigger fail-stop behavior. Subsequent to fail-stop, this method will
+     * throw an IOException("Closed"). No further syncs are allowed.
+     * <p>
+     * NOTE: When the ReplicationLogManager is capable of switching between synchronous and
+     * fallback (store-and-forward) writers, then this will be pretty bullet proof. Right now we
+     * will still try to roll the synchronous writer a few times before giving up.
+     * @throws IOException If the sync operation fails after retries, or if interrupted.
      */
     public void sync() throws IOException {
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("Sync");
+        }
         if (closed) {
             throw new IOException("Closed");
         }
         long startTime = System.nanoTime();
         try {
-            switch (mode) {
-            case SYNC:
-                // In sync mode, we only write to the remote writer.
-                try {
-                    remoteWriter.sync();
-                } catch (IOException e) {
-                    // TODO: If the remote writer fails, we must switch to store and forward.
-                    LOG.warn("Mode switching not implemented");
-                    throw e;
-                }
-                break;
-            case SYNC_AND_FORWARD:
-                // In sync and forward mode, we write to only the remote writer, while in the
-                // background we are draining the local queue.
-                try {
-                    remoteWriter.sync();
-                } catch (IOException e) {
-                    // TODO: If the remote writer fails again, we must switch back to store and
-                    // forward.
-                    LOG.warn("Mode switching not implemented");
-                    throw e;
-                }
-                break;
-            case STORE_AND_FORWARD:
-                // In store and forward mode, we sync the local writer. If we fail it's a critical
-                // failure.
-                localWriter.sync();
-                // TODO: Probe the state of the remoteWriter. Can we switch back?
-                // TODO: This suggests the ReplicationLogGroupWriter interface should have a
-                // status probe API.
-                break;
-            default:
-                throw new IllegalStateException("Invalid replication mode: " + mode);
-            }
+            syncInternal();
         } finally {
             metrics.updateSyncTime(System.nanoTime() - startTime);
+        }
+    }
+
+    /**
+     * Internal implementation of sync that publishes a sync event to the ring buffer and waits
+     * for completion.
+     */
+    protected void syncInternal() throws IOException {
+        CompletableFuture<Void> syncFuture = new CompletableFuture<>();
+        long sequence = ringBuffer.next();
+        try {
+            LogEvent event = ringBuffer.get(sequence);
+            event.setValues(LogEvent.EVENT_TYPE_SYNC, null, syncFuture);
+        } finally {
+            ringBuffer.publish(sequence);
+        }
+        LOG.trace("Published EVENT_TYPE_SYNC at sequence {}", sequence);
+        try {
+            // Wait for the event handler to process up to and including this sync event
+            syncFuture.get(syncTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException("Interrupted while waiting for sync");
+        } catch (ExecutionException e) {
+            LOG.error("Sync operation failed", e.getCause());
+            if (e.getCause() instanceof IOException) {
+                throw (IOException) e.getCause();
+            } else {
+                throw new IOException("Sync operation failed", e.getCause());
+            }
+        } catch (TimeoutException e) {
+            String message = "Sync operation timed out";
+            LOG.error(message);
+            throw new IOException(message, e);
         }
     }
 
