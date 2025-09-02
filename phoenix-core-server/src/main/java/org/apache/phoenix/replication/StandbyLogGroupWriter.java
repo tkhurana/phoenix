@@ -77,7 +77,7 @@ public class StandbyLogGroupWriter extends ReplicationLogGroupWriter {
         for (Record record : currentBatch) {
             logGroup.append(record.tableName, record.commitId, record.mutation);
         }
-        // Return true to stop processing other events
-        return true;
+        // Continue processing events so that they can be replayed to the new writer
+        return false;
     }
 }

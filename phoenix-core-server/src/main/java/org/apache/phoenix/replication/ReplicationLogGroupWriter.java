@@ -301,8 +301,8 @@ public abstract class ReplicationLogGroupWriter {
      * Take writer specific action when an append/sync event fails
      * @param currentBatch The batch of append records that were in-flight and not synced yet
      * @param e The exception that caused the failure
-     * @return True, if stop processing further events on the writer.
-     *         False, if processing should continue on the writer
+     * @return True, close the disruptor processing further events on the writer.
+     *         False, keep the disruptor open and continue processing events
      * @throws IOException
      */
     protected abstract boolean onFailure(List<Record> currentBatch, Throwable e) throws IOException;
@@ -707,7 +707,7 @@ public abstract class ReplicationLogGroupWriter {
          * Set if we get an exception appending or syncing so that all subsequence appends and syncs on
          * this writer will fail immediately.
          */
-        private Exception exception = null;
+        private IOException exception = null;
 
         protected LogEventHandler() {
             Configuration conf = logGroup.getConfiguration();
@@ -828,6 +828,12 @@ public abstract class ReplicationLogGroupWriter {
                     }
                     switch (event.type) {
                     case EVENT_TYPE_DATA:
+                        if (exception != null) {
+                            // we have encountered an exception so we can't proceed but just drain
+                            // the event and save it so that it can be retried
+                            currentBatch.add(event.record);
+                            return;
+                        }
                         writer.append(event.record.tableName, event.record.commitId,
                             event.record.mutation);
                         // Add to current batch only after we succeed at appending, so we don't
@@ -841,6 +847,16 @@ public abstract class ReplicationLogGroupWriter {
                     case EVENT_TYPE_SYNC:
                         // Add this sync future to the pending list.
                         pendingSyncFutures.add(event.syncFuture);
+                        if (exception != null) {
+                            // replay the in-flight events
+                            onFailure(currentBatch, exception);
+                            // we have handed off the current in-flight events so remove them
+                            currentBatch.clear();
+                            // drain the SYNC event from the ring buffer and fail it so that it can
+                            // be retried
+                            failPendingSyncs(sequence, exception);
+                            return;
+                        }
                         // Process any pending syncs at the end of batch.
                         if (endOfBatch) {
                             processPendingSyncs(sequence);
@@ -853,10 +869,19 @@ public abstract class ReplicationLogGroupWriter {
                 } catch (IOException e) {
                     // IO exception, force a rotation.
                     LOG.debug("Attempt " + (attempt + 1) + "/" + maxRetries + " failed", e);
-                    if (attempt >= maxRetries) {
-                        onFailure(currentBatch, e);
-                        failPendingSyncs(sequence, e);
-                        throw e;
+                    if (attempt + 1 >= maxRetries) {
+                        boolean stop = onFailure(currentBatch, e);
+                        if (!stop) {
+                            // save the exception so that we can fail the events
+                            // remaining in the ring buffer
+                            exception = e;
+                            // we have handed off the current in-flight events so remove them
+                            currentBatch.clear();
+                            failPendingSyncs(sequence, e);
+                        } else {
+                            failPendingSyncs(sequence, e);
+                            throw e;
+                        }
                     }
                     attempt++;
                     // Add delay before retrying to prevent tight loops
