@@ -57,10 +57,10 @@ public class StandbyLogGroupWriter extends ReplicationLogGroupWriter {
     @Override
     protected URI getLogURI() throws IOException {
         Configuration conf = logGroup.getConfiguration();
-        String standbyUrlString = conf.get(ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY);
+        String standbyUrlString = conf.get(ReplicationLogGroup.REPLICATION_REMOTE_HDFS_URL_KEY);
         if (standbyUrlString == null || standbyUrlString.trim().isEmpty()) {
             throw new IOException("Standby HDFS URL not configured: "
-                    + ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY);
+                    + ReplicationLogGroup.REPLICATION_REMOTE_HDFS_URL_KEY);
         }
         try {
             return new URI(standbyUrlString);

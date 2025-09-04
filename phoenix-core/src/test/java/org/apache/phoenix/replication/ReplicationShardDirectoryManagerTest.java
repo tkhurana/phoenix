@@ -53,7 +53,7 @@ public class ReplicationShardDirectoryManagerTest {
         conf = HBaseConfiguration.create();
         localFs = FileSystem.getLocal(conf);
         standbyUri = new Path(testFolder.toString()).toUri();
-        conf.set(ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY, standbyUri.toString());
+        conf.set(ReplicationLogGroup.REPLICATION_REMOTE_HDFS_URL_KEY, standbyUri.toString());
 
         // Create manager with default configuration
         Path rootPath = new Path(testFolder.getRoot().getAbsolutePath());
