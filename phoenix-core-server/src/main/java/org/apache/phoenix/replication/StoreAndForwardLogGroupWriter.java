@@ -64,10 +64,10 @@ public class StoreAndForwardLogGroupWriter extends ReplicationLogGroupWriter {
     @Override
     protected URI getLogURI() throws IOException {
         Configuration conf = logGroup.getConfiguration();
-        String fallbackUrlString = conf.get(ReplicationLogGroup.REPLICATION_FALLBACK_HDFS_URL_KEY);
+        String fallbackUrlString = conf.get(ReplicationLogGroup.REPLICATION_LOCAL_HDFS_URL_KEY);
         if (fallbackUrlString == null || fallbackUrlString.trim().isEmpty()) {
             throw new IOException("Fallback HDFS URL not configured: "
-                    + ReplicationLogGroup.REPLICATION_FALLBACK_HDFS_URL_KEY);
+                    + ReplicationLogGroup.REPLICATION_LOCAL_HDFS_URL_KEY);
         }
         try {
             return new URI(fallbackUrlString);

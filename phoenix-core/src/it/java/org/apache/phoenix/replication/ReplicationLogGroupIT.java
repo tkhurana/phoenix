@@ -115,7 +115,7 @@ public class ReplicationLogGroupIT extends ParallelStatsDisabledIT {
 
     private Map<String, List<Mutation>> groupLogsByTable() throws Exception {
         ReplicationLogGroup log = getReplicationLogGroup();
-        log.getActiveWriter().closeCurrentWriter();
+        log.getActiveLog().closeCurrentWriter();
         LogFileAnalyzer analyzer = new LogFileAnalyzer();
         analyzer.setConf(config);
         String[] args = {"--check", standbyUri.getPath()};

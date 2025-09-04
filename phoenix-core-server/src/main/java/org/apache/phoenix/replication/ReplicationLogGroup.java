@@ -17,9 +17,13 @@
  */
 package org.apache.phoenix.replication;
 
+import static org.apache.phoenix.replication.ReplicationLogGroup.LogEvent.EVENT_TYPE_DATA;
+import static org.apache.phoenix.replication.ReplicationLogGroup.LogEvent.EVENT_TYPE_SYNC;
+
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.sql.SQLException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
@@ -35,10 +39,7 @@ import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableMap;
 import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
-import org.apache.phoenix.exception.InvalidClusterRoleTransitionException;
-import org.apache.phoenix.exception.StaleHAGroupStoreRecordVersionException;
 import org.apache.phoenix.jdbc.HAGroupStoreManager;
-import org.apache.phoenix.replication.log.LogFileWriter;
 import org.apache.phoenix.replication.metrics.MetricsReplicationLogGroupSource;
 import org.apache.phoenix.replication.metrics.MetricsReplicationLogGroupSourceImpl;
 import org.apache.phoenix.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
@@ -79,9 +80,9 @@ public class ReplicationLogGroup {
     private static final Logger LOG = LoggerFactory.getLogger(ReplicationLogGroup.class);
 
     // Configuration constants from original ReplicationLog
-    public static final String REPLICATION_STANDBY_HDFS_URL_KEY =
+    public static final String REPLICATION_REMOTE_HDFS_URL_KEY =
         "phoenix.replication.log.standby.hdfs.url";
-    public static final String REPLICATION_FALLBACK_HDFS_URL_KEY =
+    public static final String REPLICATION_LOCAL_HDFS_URL_KEY =
         "phoenix.replication.log.fallback.hdfs.url";
     public static final String REPLICATION_LOG_ROTATION_TIME_MS_KEY =
         "phoenix.replication.log.rotation.time.ms";
@@ -122,8 +123,8 @@ public class ReplicationLogGroup {
     protected final String haGroupName;
     protected final MetricsReplicationLogGroupSource metrics;
     protected long syncTimeoutMs;
-    protected ReplicationLogGroupWriter remoteWriter;
-    protected ReplicationLogGroupWriter localWriter;
+    protected ReplicationLog remoteLog;
+    protected ReplicationLog localLog;
     protected ReplicationMode mode;
     protected volatile boolean closed = false;
 
@@ -199,7 +200,7 @@ public class ReplicationLogGroup {
          * is entered when connectivity to the standby cluster is restored and there are still
          * mutations in the local queue.
          */
-        SYNC_AND_FORWARD;
+        SYNC_AND_FORWARD
     }
 
     private static final ImmutableMap<ReplicationMode,
@@ -254,12 +255,13 @@ public class ReplicationLogGroup {
      * @throws IOException if initialization fails
      */
     protected void init() throws IOException {
+        // Create the replication logs before we initialize the Disruptor.
         // We need the local writer created first if we intend to fall back to it should the init
         // of the remote writer fail.
-        localWriter = createLocalWriter();
+        localLog = createLocalLog();
         // Initialize the remote writer and set the mode to SYNC. TODO: switch instead of set
         mode = ReplicationMode.SYNC;
-        remoteWriter = createRemoteWriter();
+        remoteLog = createRemoteLog();
         // TODO: Switch the initial mode to STORE_AND_FORWARD if the remote writer fails to
         // initialize.
         this.syncTimeoutMs = conf.getLong(ReplicationLogGroup.REPLICATION_LOG_SYNC_TIMEOUT_KEY,
@@ -289,10 +291,177 @@ public class ReplicationLogGroup {
      * Handles events from the Disruptor, managing batching, writer rotation, and error handling.
      */
     protected class LogEventHandler implements EventHandler<LogEvent> {
+        private final List<Record> currentBatch = new ArrayList<>();
+        private final List<CompletableFuture<Void>> pendingSyncFutures = new ArrayList<>();
+        private long generation;
 
+        protected LogEventHandler() {
+            this.generation = getActiveLog().getGeneration();
+        }
+
+        /**
+         * Processes all pending sync operations by syncing the current writer and completing
+         * their associated futures. This method is called when we are ready to process a set of
+         * consolidated sync requests and performs the following steps:
+         * <ol>
+         *   <li>Syncs the current writer to ensure all data is durably written.</li>
+         *   <li>Completes all pending sync futures successfully.</li>
+         *   <li>Clears the list of pending sync futures.</li>
+         *   <li>Clears the current batch of records since they have been successfully synced.</li>
+         * </ol>
+         * @param log The which should process the sync event
+         * @param sequence The sequence number of the last processed event
+         * @throws IOException if the sync operation fails
+         */
+        private void processPendingSyncs(ReplicationLog log, long sequence) throws IOException {
+            if (pendingSyncFutures.isEmpty()) {
+                return;
+            }
+            log.sync();
+            // Complete all pending sync futures
+            for (CompletableFuture<Void> future : pendingSyncFutures) {
+                future.complete(null);
+            }
+            pendingSyncFutures.clear();
+            // Sync completed, clear the list of in-flight appends.
+            currentBatch.clear();
+            LOG.trace("Sync operation completed successfully up to sequence {}", sequence);
+        }
+
+        /**
+         * Fails all pending sync operations with the given exception. This method is called when
+         * we encounter an unrecoverable error during the sync of the inner writer. It completes
+         * all pending sync futures that were consolidated exceptionally.
+         * <p>
+         * Note: This method does not clear the currentBatch list. The currentBatch must be
+         * preserved as it contains records that may need to be replayed if we successfully
+         * rotate to a new writer.
+         *
+         * @param sequence The sequence number of the last processed event
+         * @param e The IOException that caused the failure
+         */
+        private void failPendingSyncs(long sequence, IOException e) {
+            if (pendingSyncFutures.isEmpty()) {
+                return;
+            }
+            for (CompletableFuture<Void> future : pendingSyncFutures) {
+                future.completeExceptionally(e);
+            }
+            pendingSyncFutures.clear();
+            LOG.warn("Failed to process syncs at sequence {}", sequence, e);
+        }
+
+        /**
+         *
+         * @param e
+         */
+        private void onFailure(long sequence, IOException e) throws IOException {
+            switch (mode) {
+                case SYNC:
+                case SYNC_AND_FORWARD:
+                    switchMode(ReplicationMode.STORE_AND_FORWARD, e);
+                    // We have switched the mode, replay the batch
+                    replayBatch(sequence);
+                case STORE_AND_FORWARD:
+                    // can't recover from IOException in STORE_AND_FORWARD mode
+                    throw e;
+            }
+        }
+
+        private void replayBatch(long sequence) throws IOException {
+            ReplicationLog log = getActiveLog();
+            for (Record r : currentBatch) {
+                log.append(r.tableName, r.commitId, r.mutation);
+            }
+            processPendingSyncs(log, sequence);
+        }
+
+        /**
+         * Processes a single event from the Disruptor ring buffer. This method handles both data
+         * and sync events, with retry logic for handling IO failures.
+         * <p>
+         * For data events, it:
+         * <ol>
+         *   <li>Checks if the writer has been rotated and replays any in-flight records.</li>
+         *   <li>Appends the record to the current writer.</li>
+         *   <li>Adds the record to the current batch for potential replay.</li>
+         *   <li>Processes any pending syncs if this is the end of a batch.</li>
+         * </ol>
+         * <p>
+         * For sync events, it:
+         * <ol>
+         *   <li>Adds the sync future to the pending list.</li>
+         *   <li>Processes any pending syncs if this is the end of a batch.</li>
+         * </ol>
+         * If an IOException occurs, the method will attempt to rotate the writer and retry the
+         * operation up to the configured maximum number of retries. If all retries fail, it will
+         * fail all pending syncs and throw the exception.
+         * <p>
+         * The retry logic includes a configurable delay between attempts to prevent tight loops
+         * when there are persistent HDFS issues. This delay helps mitigate the risk of rapid
+         * cycling through writers when the underlying storage system is experiencing problems.
+         *
+         * @param event The event to process
+         * @param sequence The sequence number of the event
+         * @param endOfBatch Whether this is the last event in the current batch
+         * @throws Exception if the operation fails after all retries
+         */
         @Override
         public void onEvent(LogEvent event, long sequence, boolean endOfBatch) throws Exception {
+            // Calculate time spent in ring buffer
+            long currentTimeNs = System.nanoTime();
+            long ringBufferTimeNs = currentTimeNs - event.timestampNs;
+            metrics.updateRingBufferTime(ringBufferTimeNs);
 
+            // find the current active log to which the event needs to be sent to
+            ReplicationLog log = getActiveLog();
+            try {
+                if (log.getGeneration() > generation) {
+                    generation = log.getGeneration();
+                    // If the writer has been rotated, we need to replay the current batch of
+                    // in-flight appends into the new writer.
+                    if (!currentBatch.isEmpty()) {
+                        LOG.trace("Writer has been rotated, replaying in-flight batch");
+                        for (Record r: currentBatch) {
+                            log.append(r.tableName,  r.commitId,  r.mutation);
+                        }
+                    }
+                }
+                switch (event.type) {
+                    case EVENT_TYPE_DATA:
+                        currentBatch.add(event.record);
+                        log.append(event.record.tableName, event.record.commitId,
+                                event.record.mutation);
+                        // Process any pending syncs at the end of batch.
+                        if (endOfBatch) {
+                            processPendingSyncs(log, sequence);
+                        }
+                        return;
+                    case EVENT_TYPE_SYNC:
+                        // Add this sync future to the pending list
+                        // OK, to add the same future multiple times when we rewind the batch
+                        // as completing an already completed future is a no-op
+                        pendingSyncFutures.add(event.syncFuture);
+                        // Process any pending syncs at the end of batch.
+                        if (endOfBatch) {
+                            processPendingSyncs(log, sequence);
+                        }
+                        return;
+                    default:
+                        throw new UnsupportedOperationException("Unknown event type: "
+                                + event.type);
+                }
+            } catch (IOException e) {
+                try {
+                    onFailure(sequence, e);
+                } catch (IOException e1) {
+                    // Either we failed to switch the mode or we are in STORE_AND_FORWARD mode
+                    // and got an exception
+                    failPendingSyncs(sequence, e);
+                    // don't throw the exception and halt the disruptor
+                    // we only halt the disruptor on fatal exceptions
+                }
+            }
         }
     }
 
@@ -305,18 +474,20 @@ public class ReplicationLogGroup {
         public void handleEventException(Throwable e, long sequence, LogEvent event) {
             String message = "Exception processing sequence " + sequence + "  for event " + event;
             LOG.error(message, e);
-
+            closeOnError();
         }
 
         @Override
         public void handleOnStartException(Throwable e) {
             LOG.error("Exception during Disruptor startup", e);
+            closeOnError();
         }
 
         @Override
         public void handleOnShutdownException(Throwable e) {
             // Should not happen, but if it does, the regionserver is aborting or shutting down.
             LOG.error("Exception during Disruptor shutdown", e);
+            closeOnError();
         }
     }
 
@@ -373,7 +544,7 @@ public class ReplicationLogGroup {
             long sequence = ringBuffer.next();
             try {
                 LogEvent event = ringBuffer.get(sequence);
-                event.setValues(LogEvent.EVENT_TYPE_DATA, new Record(tableName, commitId, mutation), null);
+                event.setValues(EVENT_TYPE_DATA, new Record(tableName, commitId, mutation), null);
             } finally {
                 // Update ring buffer events metric
                 ringBuffer.publish(sequence);
@@ -422,7 +593,7 @@ public class ReplicationLogGroup {
         long sequence = ringBuffer.next();
         try {
             LogEvent event = ringBuffer.get(sequence);
-            event.setValues(LogEvent.EVENT_TYPE_SYNC, null, syncFuture);
+            event.setValues(EVENT_TYPE_SYNC, null, syncFuture);
         } finally {
             ringBuffer.publish(sequence);
         }
@@ -457,6 +628,32 @@ public class ReplicationLogGroup {
     }
 
     /**
+     * Force closes the log group upon an unrecoverable internal error.
+     * This is a fail-stop behavior: once called, the log group is marked as closed,
+     * the Disruptor is halted, and all subsequent append() and sync() calls will
+     * throw an IOException("Closed"). This ensures that no further operations are attempted on a
+     * log group that has encountered a critical error.
+     */
+    protected void closeOnError() {
+        if (closed) {
+            return;
+        }
+        synchronized (this) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+        }
+        // Directly halt the disruptor. shutdown() would wait for events to drain. We are expecting
+        // that will not work.
+        disruptor.halt();
+        closeLog(remoteLog);
+        closeLog(localLog);
+        metrics.close();
+        LOG.info("Closed on error replicationLogGroup for HA Group: {}", haGroupName);
+    }
+
+    /**
      * Close the ReplicationLogGroup and all associated resources. This method is thread-safe and
      * can be called multiple times.
      */
@@ -471,11 +668,21 @@ public class ReplicationLogGroup {
             closed = true;
             // Remove from instances cache
             INSTANCES.remove(haGroupName);
+            // Sync before shutting down to flush all pending appends.
+            try {
+                syncInternal();
+                disruptor.shutdown(); // Wait for a clean shutdown.
+            } catch (IOException e) {
+                LOG.warn("Error during final sync on close", e);
+                disruptor.halt(); // Go directly to halt.
+            }
+            // TODO revisit close logic and the below comment
+            // We must wait for the disruptor before closing the writers.
             // Close the writers, remote first. If there are any problems closing the remote writer
             // the pending writes will be sent to the local writer instead, during the appropriate
             // mode switch.
-            closeWriter(remoteWriter);
-            closeWriter(localWriter);
+            closeLog(remoteLog);
+            closeLog(localLog);
             metrics.close();
             LOG.info("Closed ReplicationLogGroup for HA Group: {}", haGroupName);
         }
@@ -533,35 +740,50 @@ public class ReplicationLogGroup {
     }
 
     /** Close the given writer. */
-    protected void closeWriter(ReplicationLogGroupWriter writer) {
-        if (writer != null) {
-            writer.close();
+    protected void closeLog(ReplicationLog log) {
+        if (log != null) {
+            log.close();
+        }
+    }
+
+
+    private URI getLogURI(String urlKey) throws IOException {
+        String urlString = conf.get(urlKey);
+        if (urlString == null || urlString.trim().isEmpty()) {
+            throw new IOException("HDFS URL not configured: " + urlKey);
+        }
+        try {
+            return new URI(urlString);
+        } catch (URISyntaxException e) {
+            throw new IOException("Invalid HDFS URL: " + urlString, e);
         }
     }
 
     /** Create the remote (synchronous) writer. Mainly for tests. */
-    protected ReplicationLogGroupWriter createRemoteWriter() throws IOException {
-        ReplicationLogGroupWriter writer = new StandbyLogGroupWriter(this);
-        writer.init();
-        return writer;
+    protected ReplicationLog createRemoteLog() throws IOException {
+        URI remoteURI = getLogURI(ReplicationLogGroup.REPLICATION_REMOTE_HDFS_URL_KEY);
+        ReplicationLog log = new ReplicationLog(this, remoteURI);
+        log.init();
+        return log;
     }
 
     /** Create the local (store and forward) writer. Mainly for tests. */
-    protected ReplicationLogGroupWriter createLocalWriter() throws IOException {
-        ReplicationLogGroupWriter writer = new StoreAndForwardLogGroupWriter(this);
-        writer.init();
-        return writer;
+    protected ReplicationLog createLocalLog() throws IOException {
+        URI localURI = getLogURI(ReplicationLogGroup.REPLICATION_LOCAL_HDFS_URL_KEY);
+        ReplicationLog log = new ReplicationLog(this, localURI);
+        log.init();
+        return log;
     }
 
     /** Returns the currently active writer. Mainly for tests. */
-    protected ReplicationLogGroupWriter getActiveWriter() {
+    protected ReplicationLog getActiveLog() {
         switch (mode) {
         case SYNC:
-            return remoteWriter;
+            return remoteLog;
         case SYNC_AND_FORWARD:
-            return remoteWriter;
+            return remoteLog;
         case STORE_AND_FORWARD:
-            return localWriter;
+            return localLog;
         default:
             throw new IllegalStateException("Invalid replication mode: " + mode);
         }

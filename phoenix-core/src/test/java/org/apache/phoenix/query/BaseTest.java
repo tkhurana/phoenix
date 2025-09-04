@@ -675,7 +675,7 @@ public abstract class BaseTest {
         }
         setPhoenixRegionServerEndpoint(conf);
         // setup up synchronous replication
-        conf.set(ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY, standbyUri.toString());
+        conf.set(ReplicationLogGroup.REPLICATION_REMOTE_HDFS_URL_KEY, standbyUri.toString());
         return conf;
     }
 

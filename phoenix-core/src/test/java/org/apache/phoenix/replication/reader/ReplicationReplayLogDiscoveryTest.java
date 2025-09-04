@@ -48,7 +48,7 @@ public class ReplicationReplayLogDiscoveryTest {
         conf = HBaseConfiguration.create();
         localFs = FileSystem.getLocal(conf);
         standbyUri = new Path(testFolder.toString()).toUri();
-        conf.set(ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY, standbyUri.toString());
+        conf.set(ReplicationLogGroup.REPLICATION_REMOTE_HDFS_URL_KEY, standbyUri.toString());
     }
 
     @After
