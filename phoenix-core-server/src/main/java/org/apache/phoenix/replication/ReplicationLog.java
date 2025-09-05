@@ -20,6 +20,8 @@ package org.apache.phoenix.replication;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -32,6 +34,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.io.compress.Compression;
+import org.apache.phoenix.replication.ReplicationLogGroup.Record;
 import org.apache.phoenix.replication.log.LogFileWriter;
 import org.apache.phoenix.replication.log.LogFileWriterContext;
 import org.apache.phoenix.replication.reader.ReplicationLogReplayFileTracker;
@@ -119,6 +122,10 @@ public class ReplicationLog {
     protected volatile boolean closed = false;
     protected ReplicationShardDirectoryManager replicationShardDirectoryManager;
     private final ConcurrentHashMap<Path, Object> shardMap = new ConcurrentHashMap<>();
+    // list of in-flight appends which haven't been synced yet
+    private final List<Record> currentBatch = new ArrayList<>();
+    //
+    private long generation;
 
     /** The reason for requesting a log rotation. */
     protected enum RotationReason {
@@ -177,6 +184,7 @@ public class ReplicationLog {
         startRotationExecutor();
         // Create the initial writer
         currentWriter = createNewWriter();
+        generation = currentWriter.getGeneration();
     }
 
     /** Initialize file systems needed by the writer. */
@@ -433,6 +441,17 @@ public class ReplicationLog {
                 throw new IOException("Closed");
             }
             try {
+                if (writer.getGeneration() > generation) {
+                    generation = writer.getGeneration();
+                    // If the writer has been rotated, we need to replay the current batch of
+                    // in-flight appends into the new writer.
+                    if (!currentBatch.isEmpty()) {
+                        LOG.trace("Writer has been rotated, replaying in-flight batch");
+                        for (Record r: currentBatch) {
+                            writer.append(r.tableName,  r.commitId,  r.mutation);
+                        }
+                    }
+                }
                 action.action(writer);
                 break;
             } catch (IOException e) {
@@ -453,12 +472,25 @@ public class ReplicationLog {
         }
     }
 
-    public void append(String tableName, long commitId, Mutation mutation) throws IOException {
+    protected void append(Record r) throws IOException {
+        apply(writer -> writer.append(r.tableName, r.commitId, r.mutation));
+        // Add to current batch only after we succeed at appending, so we don't
+        // replay it twice.
+        currentBatch.add(r);
+    }
+
+    protected void append(String tableName, long commitId, Mutation mutation) throws IOException {
         apply(writer -> writer.append(tableName, commitId, mutation));
     }
 
-    public void sync() throws IOException {
+    protected void sync() throws IOException {
         apply(writer -> writer.sync());
+        // Sync completed, clear the list of in-flight appends.
+        currentBatch.clear();
+    }
+
+    protected List<Record> getCurrentBatch() {
+        return currentBatch;
     }
 
     /**
