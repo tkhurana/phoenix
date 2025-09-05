@@ -121,6 +121,7 @@ public class ReplicationLogGroup {
     protected final Configuration conf;
     protected final ServerName serverName;
     protected final String haGroupName;
+    protected final HAGroupStoreManager haGroupStoreManager;
     protected final MetricsReplicationLogGroupSource metrics;
     protected long syncTimeoutMs;
     protected ReplicationLog remoteLog;
@@ -243,9 +244,25 @@ public class ReplicationLogGroup {
      * @param haGroupName The HA Group name
      */
     protected ReplicationLogGroup(Configuration conf, ServerName serverName, String haGroupName) {
+        this(conf, serverName, haGroupName, HAGroupStoreManager.getInstance(conf));
+    }
+
+    /**
+     * Protected constructor for ReplicationLogGroup.
+     *
+     * @param conf Configuration object
+     * @param serverName The server name
+     * @param haGroupName The HA Group name
+     * @param haGroupStoreManager HA Group Store Manager instance
+     */
+    protected ReplicationLogGroup(Configuration conf,
+                                  ServerName serverName,
+                                  String haGroupName,
+                                  HAGroupStoreManager haGroupStoreManager) {
         this.conf = conf;
         this.serverName = serverName;
         this.haGroupName = haGroupName;
+        this.haGroupStoreManager = haGroupStoreManager;
         this.metrics = createMetricsSource();
     }
 
@@ -444,6 +461,7 @@ public class ReplicationLogGroup {
                 }
             } catch (IOException e) {
                 try {
+                    LOG.info("Failed to process event at sequence {} on log {}", sequence, log, e);
                     onFailure(event, log, sequence, e);
                 } catch (IOException e1) {
                     // Either we failed to switch the mode or we are in STORE_AND_FORWARD mode
@@ -686,7 +704,7 @@ public class ReplicationLogGroup {
      * @param reason The reason for the mode switch
      * @throws IOException If the mode switch fails
      */
-    public void switchMode(ReplicationMode newMode, Throwable reason) throws IOException {
+    protected void switchMode(ReplicationMode newMode, Throwable reason) throws IOException {
         if (mode.equals(newMode)) {
             LOG.info("HA group {} is already in new mode {}", this, newMode);
             return;
@@ -696,17 +714,15 @@ public class ReplicationLogGroup {
             throw new DoNotRetryIOException("Can not transit HA Group " + haGroupName +
                     " mode from " + this.mode + " to " + newMode);
         }
-
         LOG.info("Attempting to switch replication mode for HA Group: {} from {} to {} because {}",
                 this, this.mode, newMode, reason);
-
-        HAGroupStoreManager haGroupStoreManager = HAGroupStoreManager.getInstance(conf);
 
         switch (mode) {
             case SYNC:
                 // SYNC -> STORE_AND_FORWARD
                 try {
                     haGroupStoreManager.setHAGroupStatusToStoreAndForward(haGroupName);
+                    mode = newMode;
                 } catch (IOException e) {
                     throw e;
                 }
@@ -716,8 +732,7 @@ public class ReplicationLogGroup {
                 break;
         }
 
-        LOG.info("Switched replication mode for HA Group: {} from {} to {}",
-                this, this.mode, newMode);
+        LOG.info("Switched replication mode for HA Group: {} to {}", this, this.mode);
     }
 
     /** Get the current metrics source for monitoring operations. */

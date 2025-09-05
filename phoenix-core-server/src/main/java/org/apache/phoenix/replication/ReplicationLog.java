@@ -356,10 +356,7 @@ public class ReplicationLog {
             LogFileWriter newWriter = createNewWriter();
             LOG.debug("Created new writer: {}", newWriter);
             // Close the current writer
-            if (currentWriter != null) {
-                LOG.debug("Closing current writer: {}", currentWriter);
-                closeWriter(currentWriter);
-            }
+            closeWriter(currentWriter);
             currentWriter = newWriter;
             lastRotationTime.set(EnvironmentEdgeManager.currentTimeMillis());
             rotationFailures.set(0);
@@ -396,10 +393,11 @@ public class ReplicationLog {
     }
 
     /** Closes the given writer, logging any errors that occur during close. */
-    protected void closeWriter(LogFileWriter writer) {
+    private void closeWriter(LogFileWriter writer) {
         if (writer == null) {
             return;
         }
+        LOG.debug("Closing writer: {}", writer);
         try {
             writer.close();
         } catch (IOException e) {
@@ -413,7 +411,6 @@ public class ReplicationLog {
      */
     protected void closeCurrentWriter() {
         closeWriter(currentWriter);
-        //currentWriter = null;
     }
 
     /**
@@ -453,6 +450,8 @@ public class ReplicationLog {
                 // IO exception, force a rotation.
                 LOG.debug("Attempt " + attempt + "/" + maxAttempts + " failed", e);
                 if (attempt == maxAttempts) {
+                    // TODO: Add log
+                    closeOnError();
                     throw e;
                 }
                 // Add delay before retrying to prevent tight loops
@@ -508,9 +507,6 @@ public class ReplicationLog {
         stopRotationExecutor();
         // We expect a final sync will not work. Just close the inner writer.
         closeWriter(currentWriter);
-        // Directly halt the disruptor. shutdown() would wait for events to drain. We are expecting
-        // that will not work.
-        //disruptor.halt();
     }
 
     /** Closes the log. */

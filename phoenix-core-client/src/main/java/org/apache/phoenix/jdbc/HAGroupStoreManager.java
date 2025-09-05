@@ -63,7 +63,7 @@ public class HAGroupStoreManager {
         return haGroupStoreManagerInstance;
     }
 
-    private HAGroupStoreManager(final Configuration conf) {
+    protected HAGroupStoreManager(final Configuration conf) {
         this.mutationBlockEnabled = conf.getBoolean(CLUSTER_ROLE_BASED_MUTATION_BLOCK_ENABLED,
                 DEFAULT_CLUSTER_ROLE_BASED_MUTATION_BLOCK_ENABLED);
         this.zkUrl = getLocalZkUrl(conf);

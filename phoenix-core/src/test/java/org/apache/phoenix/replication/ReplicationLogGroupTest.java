@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -52,6 +53,8 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.phoenix.jdbc.HAGroupStoreManager;
+import org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode;
 import org.apache.phoenix.replication.log.LogFileWriter;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.junit.After;
@@ -92,6 +95,7 @@ public class ReplicationLogGroupTest {
     static final int TEST_SYNC_TIMEOUT = 1000;
     static final int TEST_ROTATION_TIME = 5000;
     static final int TEST_ROTATION_SIZE_BYTES = 10 * 1024;
+    static final String HA_GROUP_NAME = "testHAGroup";
 
     @Before
     public void setUp() throws IOException {
@@ -112,7 +116,9 @@ public class ReplicationLogGroupTest {
         conf.setLong(ReplicationLogGroup.REPLICATION_LOG_ROTATION_SIZE_BYTES_KEY,
             TEST_ROTATION_SIZE_BYTES);
 
-        logGroup = new TestableLogGroup(conf, serverName, "testHAGroup", remoteUri, localUri);
+        TestableHAGroupStoreManager mock = mock(TestableHAGroupStoreManager.class);
+        logGroup = new TestableLogGroup(conf, serverName, HA_GROUP_NAME,
+                remoteUri, localUri, mock);
         logGroup.init();
     }
 
@@ -197,35 +203,6 @@ public class ReplicationLogGroupTest {
       inOrder.verify(writerAfterRoll, times(1))
           .append(eq(tableName), eq(commitId), eq(put)); // Replay
       inOrder.verify(writerAfterRoll, times(1)).sync(); // Succeeded
-    }
-
-    /**
-     * Tests the behavior when a sync operation fails multiple times until all the
-     * attempts are exhausted
-     */
-    @Test
-    public void testSyncFailureRetriesExhausted() throws Exception {
-        final String tableName = "TBLSFR";
-        final long commitId = 1L;
-        final Mutation put = LogFileTestUtil.newPut("row", 1, 1);
-
-        ReplicationLog activeLog = logGroup.getActiveLog();
-        // Get the initial inner writer
-        LogFileWriter initialWriter = activeLog.getWriter();
-        assertNotNull("Initial writer should not be null", initialWriter);
-        // always return the same writer on every roll so that we can simulate failure
-        // on all retries
-        when(activeLog.createNewWriter()).thenReturn(initialWriter);
-        // Configure writer to fail on all sync calls
-        doThrow(new IOException("Simulated sync failure")).when(initialWriter).sync();
-
-        logGroup.append(tableName, commitId, put);
-        try {
-            logGroup.sync();
-            fail("Should have thrown IOException because sync should have failed");
-        } catch (IOException e) {
-            assertTrue(e.getMessage().contains("Simulated sync failure"));
-        }
     }
 
     /**
@@ -696,15 +673,11 @@ public class ReplicationLogGroupTest {
             }
         }
 
-        // Verify subsequent operations fail because the log is closed
-        try {
-            logGroup.append(tableName, commitId + 1, put);
-            logGroup.sync();
-            fail("Expected append to fail because log is closed");
-        } catch (IOException e) {
-            assertTrue("Expected an IOException because log is closed",
-                e.getMessage().contains("Closed"));
-        }
+        // Verify subsequent operations will fail because the log is closed and then trigger
+        // a mode switch to STORE_AND_FORWARD
+        logGroup.append(tableName, commitId + 1, put);
+        logGroup.sync();
+        assertEquals(ReplicationMode.STORE_AND_FORWARD, logGroup.mode);
     }
 
     /**
@@ -748,11 +721,12 @@ public class ReplicationLogGroupTest {
     }
 
     /**
-     * Tests behavior when all sync retry attempts are exhausted. Verifies that the system properly
-     * handles the case where sync operations fail repeatedly and eventually timeout.
+     * Tests the behavior when a sync operation fails multiple times until all the
+     * attempts are exhausted on the remote cluster and then we switch to the STORE_AND_FORWARD
+     * mode and successfully complete the sync
      */
     @Test
-    public void testSyncFailureAllRetriesExhausted() throws Exception {
+    public void testSwitchToStoreAndForwardOnSyncFailure() throws Exception {
         final String tableName = "TBLSAFR";
         final long commitId = 1L;
         final Mutation put = LogFileTestUtil.newPut("row", 1, 1);
@@ -772,17 +746,12 @@ public class ReplicationLogGroupTest {
 
         // Append data
         logGroup.append(tableName, commitId, put);
+        // Try to sync. Should fail after exhausting retries and then switch to STORE_AND_FORWARD
+        logGroup.sync();
 
-        // Try to sync. Should fail after exhausting retries.
-        try {
-            logGroup.sync();
-            fail("Expected sync to fail after exhausting retries");
-        } catch (IOException e) {
-            assertTrue("Expected timeout exception", e.getCause() instanceof TimeoutException);
-        }
-
-        // Each retry creates a new writer, so that is at least 1 create + 5 retries.
-        verify(activeLog, atLeast(6)).createNewWriter();
+        // Each retry creates a new writer, so that is at least 1 create + 4 retries.
+        verify(activeLog, atLeast(5)).createNewWriter();
+        assertEquals(ReplicationMode.STORE_AND_FORWARD, logGroup.mode);
     }
 
     /**
@@ -1274,8 +1243,9 @@ public class ReplicationLogGroupTest {
                                 ServerName serverName,
                                 String haGroupName,
                                 URI remoteUri,
-                                URI localUri) {
-            super(conf, serverName, haGroupName);
+                                URI localUri,
+                                HAGroupStoreManager haGroupStoreManager) {
+            super(conf, serverName, haGroupName, haGroupStoreManager);
             this.remoteUri = remoteUri;
             this.localUri = localUri;
         }
@@ -1309,6 +1279,16 @@ public class ReplicationLogGroupTest {
         protected LogFileWriter createNewWriter() throws IOException {
             LogFileWriter writer = super.createNewWriter();
             return spy(writer);
+        }
+    }
+
+    /**
+     *
+     */
+    static class TestableHAGroupStoreManager extends HAGroupStoreManager {
+
+        public TestableHAGroupStoreManager(Configuration conf) {
+            super(conf);
         }
     }
 }
