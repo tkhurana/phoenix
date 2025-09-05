@@ -291,13 +291,7 @@ public class ReplicationLogGroup {
      * Handles events from the Disruptor, managing batching, writer rotation, and error handling.
      */
     protected class LogEventHandler implements EventHandler<LogEvent> {
-        private final List<Record> currentBatch = new ArrayList<>();
         private final List<CompletableFuture<Void>> pendingSyncFutures = new ArrayList<>();
-        private long generation;
-
-        protected LogEventHandler() {
-            this.generation = getActiveLog().getGeneration();
-        }
 
         /**
          * Processes all pending sync operations by syncing the current writer and completing
@@ -323,8 +317,6 @@ public class ReplicationLogGroup {
                 future.complete(null);
             }
             pendingSyncFutures.clear();
-            // Sync completed, clear the list of in-flight appends.
-            currentBatch.clear();
             LOG.trace("Sync operation completed successfully up to sequence {}", sequence);
         }
 
@@ -355,25 +347,25 @@ public class ReplicationLogGroup {
          *
          * @param e
          */
-        private void onFailure(long sequence, IOException e) throws IOException {
+        private void onFailure(ReplicationLog currentLog, long sequence, IOException e) throws IOException {
             switch (mode) {
                 case SYNC:
                 case SYNC_AND_FORWARD:
                     switchMode(ReplicationMode.STORE_AND_FORWARD, e);
                     // We have switched the mode, replay the batch
-                    replayBatch(sequence);
+                    replayBatch(currentLog, sequence);
                 case STORE_AND_FORWARD:
                     // can't recover from IOException in STORE_AND_FORWARD mode
                     throw e;
             }
         }
 
-        private void replayBatch(long sequence) throws IOException {
-            ReplicationLog log = getActiveLog();
-            for (Record r : currentBatch) {
-                log.append(r.tableName, r.commitId, r.mutation);
+        private void replayBatch(ReplicationLog currentLog, long sequence) throws IOException {
+            ReplicationLog newlog = getActiveLog();
+            for (Record r : currentLog.getCurrentBatch()) {
+                newlog.append(r);
             }
-            processPendingSyncs(log, sequence);
+            processPendingSyncs(newlog, sequence);
         }
 
         /**
@@ -416,22 +408,9 @@ public class ReplicationLogGroup {
             // find the current active log to which the event needs to be sent to
             ReplicationLog log = getActiveLog();
             try {
-                if (log.getGeneration() > generation) {
-                    generation = log.getGeneration();
-                    // If the writer has been rotated, we need to replay the current batch of
-                    // in-flight appends into the new writer.
-                    if (!currentBatch.isEmpty()) {
-                        LOG.trace("Writer has been rotated, replaying in-flight batch");
-                        for (Record r: currentBatch) {
-                            log.append(r.tableName,  r.commitId,  r.mutation);
-                        }
-                    }
-                }
                 switch (event.type) {
                     case EVENT_TYPE_DATA:
-                        currentBatch.add(event.record);
-                        log.append(event.record.tableName, event.record.commitId,
-                                event.record.mutation);
+                        log.append(event.record);
                         // Process any pending syncs at the end of batch.
                         if (endOfBatch) {
                             processPendingSyncs(log, sequence);
@@ -453,7 +432,7 @@ public class ReplicationLogGroup {
                 }
             } catch (IOException e) {
                 try {
-                    onFailure(sequence, e);
+                    onFailure(log, sequence, e);
                 } catch (IOException e1) {
                     // Either we failed to switch the mode or we are in STORE_AND_FORWARD mode
                     // and got an exception
