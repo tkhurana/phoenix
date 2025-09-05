@@ -122,7 +122,7 @@ public class ReplicationLog {
     protected volatile boolean closed = false;
     protected ReplicationShardDirectoryManager replicationShardDirectoryManager;
     private final ConcurrentHashMap<Path, Object> shardMap = new ConcurrentHashMap<>();
-    // list of in-flight appends which haven't been synced yet
+    // list of in-flight appends which are successful but haven't been synced yet
     private final List<Record> currentBatch = new ArrayList<>();
     //
     private long generation;
@@ -322,11 +322,6 @@ public class ReplicationLog {
         }
 
         return false;
-    }
-
-    /** Used by higher level callers to determine if the log has been rotated under the hood */
-    protected long getGeneration() {
-        return currentWriter.getGeneration();
     }
 
     /**

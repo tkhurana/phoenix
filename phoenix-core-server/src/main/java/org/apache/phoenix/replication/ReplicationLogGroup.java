@@ -347,23 +347,35 @@ public class ReplicationLogGroup {
          *
          * @param e
          */
-        private void onFailure(ReplicationLog currentLog, long sequence, IOException e) throws IOException {
+        private void onFailure(LogEvent failedEvent,
+                               ReplicationLog currentLog,
+                               long sequence,
+                               IOException e) throws IOException {
             switch (mode) {
                 case SYNC:
                 case SYNC_AND_FORWARD:
                     switchMode(ReplicationMode.STORE_AND_FORWARD, e);
                     // We have switched the mode, replay the batch
-                    replayBatch(currentLog, sequence);
+                    replayBatch(failedEvent, currentLog, sequence);
                 case STORE_AND_FORWARD:
                     // can't recover from IOException in STORE_AND_FORWARD mode
                     throw e;
             }
         }
 
-        private void replayBatch(ReplicationLog currentLog, long sequence) throws IOException {
+        private void replayBatch(LogEvent failedEvent,
+                                 ReplicationLog oldLog,
+                                 long sequence) throws IOException {
             ReplicationLog newlog = getActiveLog();
-            for (Record r : currentLog.getCurrentBatch()) {
+            // first replay all appends which were successful but not synced to the old log
+            for (Record r : oldLog.getCurrentBatch()) {
                 newlog.append(r);
+            }
+            // now retry the event which failed
+            // only need to retry append event since for sync event we have already added the
+            // sync event future to the pending future list
+            if (failedEvent.type == EVENT_TYPE_DATA) {
+                newlog.append(failedEvent.record);
             }
             processPendingSyncs(newlog, sequence);
         }
@@ -432,7 +444,7 @@ public class ReplicationLogGroup {
                 }
             } catch (IOException e) {
                 try {
-                    onFailure(log, sequence, e);
+                    onFailure(event, log, sequence, e);
                 } catch (IOException e1) {
                     // Either we failed to switch the mode or we are in STORE_AND_FORWARD mode
                     // and got an exception
