@@ -19,6 +19,10 @@ package org.apache.phoenix.replication;
 
 import static org.apache.phoenix.replication.ReplicationLogGroup.LogEvent.EVENT_TYPE_DATA;
 import static org.apache.phoenix.replication.ReplicationLogGroup.LogEvent.EVENT_TYPE_SYNC;
+import static org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode.State.INIT;
+import static org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode.State.SYNC;
+import static org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode.State.STORE_AND_FORWARD;
+import static org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode.State.SYNC_AND_FORWARD;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -124,8 +128,6 @@ public class ReplicationLogGroup {
     protected final HAGroupStoreManager haGroupStoreManager;
     protected final MetricsReplicationLogGroupSource metrics;
     protected long syncTimeoutMs;
-    protected ReplicationLog remoteLog;
-    protected ReplicationLog localLog;
     protected ReplicationMode mode;
     protected volatile boolean closed = false;
 
@@ -182,36 +184,228 @@ public class ReplicationLogGroup {
      * Mode transitions occur automatically based on the availability of the standby cluster's HDFS
      * and the state of the local mutation queue.
      */
-    protected enum ReplicationMode {
-        /**
-         * Normal operation where mutations are written directly to the standby cluster's HDFS.
-         * This is the default and primary mode of operation.
-         */
-        SYNC,
+    interface ReplicationMode {
+        enum State {
+            /**
+             *
+             */
+            INIT,
+
+            /**
+             * Normal operation where mutations are written directly to the standby cluster's HDFS.
+             * This is the default and primary mode of operation.
+             */
+            SYNC,
+
+            /**
+             * Fallback mode when the standby cluster's HDFS is unavailable. Mutations are stored
+             * locally and will be forwarded when connectivity is restored.
+             */
+            STORE_AND_FORWARD,
+
+            /**
+             * Transitional mode where new mutations are written directly to the standby cluster
+             * while concurrently draining the local queue of previously stored mutations. This mode
+             * is entered when connectivity to the standby cluster is restored and there are still
+             * mutations in the local queue.
+             */
+            SYNC_AND_FORWARD
+        }
 
         /**
-         * Fallback mode when the standby cluster's HDFS is unavailable. Mutations are stored
-         * locally and will be forwarded when connectivity is restored.
+         *
+         * @throws IOException
          */
-        STORE_AND_FORWARD,
+        void onEnter() throws IOException;
 
         /**
-         * Transitional mode where new mutations are written directly to the standby cluster
-         * while concurrently draining the local queue of previously stored mutations. This mode
-         * is entered when connectivity to the standby cluster is restored and there are still
-         * mutations in the local queue.
+         *
          */
-        SYNC_AND_FORWARD
+        void onExit();
+
+        /**
+         *
+         * @param e
+         * @throws IOException
+         */
+        void onFailure(Throwable e) throws IOException;
+
+        /**
+         *
+         * @return
+         */
+        ReplicationLog getReplicationLog();
+
+        void close();
+
+        void closeOnError();
+
+        State getState();
     }
 
-    private static final ImmutableMap<ReplicationMode,
-            EnumSet<ReplicationMode>> allowedTransition = Maps.immutableEnumMap(ImmutableMap.of(
-                    ReplicationMode.SYNC,
-                    EnumSet.of(ReplicationMode.STORE_AND_FORWARD),
-                    ReplicationMode.STORE_AND_FORWARD,
-                    EnumSet.of(ReplicationMode.SYNC_AND_FORWARD),
-                    ReplicationMode.SYNC_AND_FORWARD,
-                    EnumSet.of(ReplicationMode.SYNC, ReplicationMode.STORE_AND_FORWARD)));
+    protected class Init implements ReplicationMode {
+
+        @Override
+        public void onEnter() throws IOException {}
+
+        @Override
+        public void onExit() {}
+
+        @Override
+        public void onFailure(Throwable e) throws IOException {
+            throw new UnsupportedOperationException("Not supported for " + this);
+        }
+
+        @Override
+        public ReplicationLog getReplicationLog() {
+            throw new UnsupportedOperationException("Not supported for " + this);
+        }
+
+        @Override
+        public void close() {}
+
+        @Override
+        public void closeOnError() {}
+
+        @Override
+        public State getState() {
+            return INIT;
+        }
+
+        @Override
+        public String toString() {
+            return getState().name();
+        }
+    }
+
+    protected class Sync implements ReplicationMode {
+
+        private ReplicationLog remoteLog;
+
+        @Override
+        public void onEnter() throws IOException {
+            remoteLog = createRemoteLog();
+            remoteLog.init();
+        }
+
+        @Override
+        public void onExit() {
+            getReplicationLog().close();
+        }
+
+        @Override
+        public void onFailure(Throwable e) throws IOException {
+            try {
+                LOG.info("{} mode={} got error", haGroupName, this, e);
+                haGroupStoreManager.setHAGroupStatusToStoreAndForward(haGroupName);
+                switchMode(new StoreAndForward());
+            }
+            catch (IOException ex) {
+                // TODO logging
+                throw ex;
+            }
+            catch (Exception ex) {
+                // TODO logging
+                throw new IOException(ex);
+            }
+        }
+
+        @Override
+        public ReplicationLog getReplicationLog() {
+            return remoteLog;
+        }
+
+        @Override
+        public void close() {
+            getReplicationLog().close();
+        }
+
+        @Override
+        public void closeOnError() {
+            getReplicationLog().closeOnError();
+        }
+
+        @Override
+        public State getState() {
+            return SYNC;
+        }
+
+        @Override
+        public String toString() {
+            return getState().name();
+        }
+    }
+
+    protected class StoreAndForward implements ReplicationMode {
+
+        private ReplicationLog localLog;
+
+        @Override
+        public void onEnter() throws IOException {
+            localLog = createLocalLog();
+            localLog.init();
+        }
+
+        @Override
+        public void onExit() {
+            getReplicationLog().close();
+        }
+
+        @Override
+        public ReplicationLog getReplicationLog() {
+            return localLog;
+        }
+
+        @Override
+        public void close() {
+            getReplicationLog().close();
+        }
+
+        @Override
+        public void closeOnError() {
+            getReplicationLog().closeOnError();
+        }
+
+        @Override
+        public void onFailure(Throwable e) throws IOException {
+            // TODO logging
+            if (e.getCause() instanceof IOException) {
+                throw (IOException) e.getCause();
+            } else {
+                throw new IOException(e.getCause());
+            }
+        }
+
+        @Override
+        public State getState() {
+            return STORE_AND_FORWARD;
+        }
+
+        @Override
+        public String toString() {
+            return getState().name();
+        }
+    }
+
+    protected class SyncAndForward extends Sync {
+
+        @Override
+        public State getState() {
+            return SYNC_AND_FORWARD;
+        }
+
+        @Override
+        public String toString() {
+            return getState().name();
+        }
+    }
+
+    private static final ImmutableMap<ReplicationMode.State, EnumSet<ReplicationMode.State>> allowedTransition =
+            Maps.immutableEnumMap(ImmutableMap.of(
+                    INIT, EnumSet.of(SYNC, STORE_AND_FORWARD),
+                    SYNC, EnumSet.of(STORE_AND_FORWARD),
+                    STORE_AND_FORWARD, EnumSet.of(SYNC_AND_FORWARD),
+                    SYNC_AND_FORWARD, EnumSet.of(SYNC, STORE_AND_FORWARD)));
 
     /**
      * Get or create a ReplicationLogGroup instance for the given HA Group.
@@ -264,6 +458,7 @@ public class ReplicationLogGroup {
         this.haGroupName = haGroupName;
         this.haGroupStoreManager = haGroupStoreManager;
         this.metrics = createMetricsSource();
+        this.mode = new Init();
     }
 
     /**
@@ -272,19 +467,18 @@ public class ReplicationLogGroup {
      * @throws IOException if initialization fails
      */
     protected void init() throws IOException {
-        // Create the replication logs before we initialize the Disruptor.
-        // We need the local writer created first if we intend to fall back to it should the init
-        // of the remote writer fail.
-        localLog = createLocalLog();
-        // Initialize the remote writer and set the mode to SYNC. TODO: switch instead of set
-        mode = ReplicationMode.SYNC;
-        remoteLog = createRemoteLog();
-        // TODO: Switch the initial mode to STORE_AND_FORWARD if the remote writer fails to
+        initializeReplicationMode();
         // initialize.
         this.syncTimeoutMs = conf.getLong(ReplicationLogGroup.REPLICATION_LOG_SYNC_TIMEOUT_KEY,
                 ReplicationLogGroup.DEFAULT_REPLICATION_LOG_SYNC_TIMEOUT);
         initializeDisruptor();
         LOG.info("Started ReplicationLogGroup for HA Group: {}", this);
+    }
+
+    protected void initializeReplicationMode() throws IOException {
+        //TODO Do we need to read from HA Group store to determine if we should transition from
+        // INIT -> SYNC or INIT -> STORE_AND_FORWARD
+        switchMode(new Sync());
     }
 
     /** Initialize the Disruptor. */
@@ -368,16 +562,10 @@ public class ReplicationLogGroup {
                                ReplicationLog currentLog,
                                long sequence,
                                IOException e) throws IOException {
-            switch (mode) {
-                case SYNC:
-                case SYNC_AND_FORWARD:
-                    switchMode(ReplicationMode.STORE_AND_FORWARD, e);
-                    // We have switched the mode, replay the batch
-                    replayBatch(failedEvent, currentLog, sequence);
-                case STORE_AND_FORWARD:
-                    // can't recover from IOException in STORE_AND_FORWARD mode
-                    throw e;
-            }
+            // Trying do the mode switch
+            mode.onFailure(e);
+            // retry the batch
+            replayBatch(failedEvent, currentLog, sequence);
         }
 
         private void replayBatch(LogEvent failedEvent,
@@ -623,7 +811,9 @@ public class ReplicationLogGroup {
         } catch (TimeoutException e) {
             String message = "Sync operation timed out";
             LOG.error(message);
-            throw new IOException(message, e);
+            mode.onFailure(new IOException(message, e));
+            // gracefully handled the failure, retry the sync
+            syncInternal();
         }
     }
 
@@ -656,8 +846,7 @@ public class ReplicationLogGroup {
         // Directly halt the disruptor. shutdown() would wait for events to drain. We are expecting
         // that will not work.
         disruptor.halt();
-        closeLog(remoteLog);
-        closeLog(localLog);
+        mode.closeOnError();
         metrics.close();
         LOG.info("Closed on error replicationLogGroup for HA Group: {}", haGroupName);
     }
@@ -687,11 +876,7 @@ public class ReplicationLogGroup {
             }
             // TODO revisit close logic and the below comment
             // We must wait for the disruptor before closing the writers.
-            // Close the writers, remote first. If there are any problems closing the remote writer
-            // the pending writes will be sent to the local writer instead, during the appropriate
-            // mode switch.
-            closeLog(remoteLog);
-            closeLog(localLog);
+            mode.close();
             metrics.close();
             LOG.info("Closed ReplicationLogGroup for HA Group: {}", haGroupName);
         }
@@ -701,37 +886,37 @@ public class ReplicationLogGroup {
      * Switch the replication mode.
      *
      * @param newMode The new replication mode
-     * @param reason The reason for the mode switch
      * @throws IOException If the mode switch fails
      */
-    protected void switchMode(ReplicationMode newMode, Throwable reason) throws IOException {
-        if (mode.equals(newMode)) {
+    protected void switchMode(ReplicationMode newMode) throws IOException {
+        if (mode.getState().equals(newMode.getState())) {
             LOG.info("HA group {} is already in new mode {}", this, newMode);
             return;
         }
-        EnumSet<ReplicationMode> allowedToStates = allowedTransition.get(this.mode);
-        if (allowedToStates == null || !allowedToStates.contains(newMode)) {
+        EnumSet<ReplicationMode.State> allowedToStates = allowedTransition.get(this.mode.getState());
+        if (allowedToStates == null || !allowedToStates.contains(newMode.getState())) {
             throw new DoNotRetryIOException("Can not transit HA Group " + haGroupName +
                     " mode from " + this.mode + " to " + newMode);
         }
-        LOG.info("Attempting to switch replication mode for HA Group: {} from {} to {} because {}",
-                this, this.mode, newMode, reason);
+        LOG.info("Attempting to switch replication mode for HA Group: {} from {} to {}",
+                this, mode, newMode);
 
-        switch (mode) {
-            case SYNC:
-                // SYNC -> STORE_AND_FORWARD
-                try {
-                    haGroupStoreManager.setHAGroupStatusToStoreAndForward(haGroupName);
-                    mode = newMode;
-                } catch (IOException e) {
-                    throw e;
-                }
-                catch (Exception e) {
-                    throw new IOException(e);
-                }
-                break;
+        try {
+            // exit the current mode
+            mode.onExit();
+            // make the switch
+            mode = newMode;
+            // enter the new mode
+            mode.onEnter();
+        } catch (IOException e) {
+            try {
+                //TODO logging
+                mode.onFailure(e);
+            } catch (IOException ex) {
+                //TODO logging
+                throw ex;
+            }
         }
-
         LOG.info("Switched replication mode for HA Group: {} to {}", this, this.mode);
     }
 
@@ -744,14 +929,6 @@ public class ReplicationLogGroup {
     protected MetricsReplicationLogGroupSource createMetricsSource() {
         return new MetricsReplicationLogGroupSourceImpl(haGroupName);
     }
-
-    /** Close the given writer. */
-    protected void closeLog(ReplicationLog log) {
-        if (log != null) {
-            log.close();
-        }
-    }
-
 
     private URI getLogURI(String urlKey) throws IOException {
         String urlString = conf.get(urlKey);
@@ -769,7 +946,6 @@ public class ReplicationLogGroup {
     protected ReplicationLog createRemoteLog() throws IOException {
         URI remoteURI = getLogURI(ReplicationLogGroup.REPLICATION_REMOTE_HDFS_URL_KEY);
         ReplicationLog log = new ReplicationLog(this, remoteURI);
-        log.init();
         return log;
     }
 
@@ -777,21 +953,11 @@ public class ReplicationLogGroup {
     protected ReplicationLog createLocalLog() throws IOException {
         URI localURI = getLogURI(ReplicationLogGroup.REPLICATION_LOCAL_HDFS_URL_KEY);
         ReplicationLog log = new ReplicationLog(this, localURI);
-        log.init();
         return log;
     }
 
     /** Returns the currently active writer. Mainly for tests. */
     protected ReplicationLog getActiveLog() {
-        switch (mode) {
-        case SYNC:
-            return remoteLog;
-        case SYNC_AND_FORWARD:
-            return remoteLog;
-        case STORE_AND_FORWARD:
-            return localLog;
-        default:
-            throw new IllegalStateException("Invalid replication mode: " + mode);
-        }
+        return mode.getReplicationLog();
     }
 }

@@ -677,7 +677,7 @@ public class ReplicationLogGroupTest {
         // a mode switch to STORE_AND_FORWARD
         logGroup.append(tableName, commitId + 1, put);
         logGroup.sync();
-        assertEquals(ReplicationMode.STORE_AND_FORWARD, logGroup.mode);
+        assertEquals(ReplicationMode.State.STORE_AND_FORWARD, logGroup.mode.getState());
     }
 
     /**
@@ -751,7 +751,7 @@ public class ReplicationLogGroupTest {
 
         // Each retry creates a new writer, so that is at least 1 create + 4 retries.
         verify(activeLog, atLeast(5)).createNewWriter();
-        assertEquals(ReplicationMode.STORE_AND_FORWARD, logGroup.mode);
+        assertEquals(ReplicationMode.State.STORE_AND_FORWARD, logGroup.mode.getState());
     }
 
     /**
