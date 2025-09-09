@@ -35,7 +35,6 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.net.URI;
@@ -320,6 +319,7 @@ public class ReplicationLogGroupTest {
             public Object answer(InvocationOnMock invocation) throws Throwable {
                 // Pause long enough to cause a timeout.
                 Thread.sleep((long)(TEST_SYNC_TIMEOUT * 1.25));
+                LOG.info("Waking up from sleep");
                 return invocation.callRealMethod();
             }
         }).when(innerWriter).sync();
@@ -327,13 +327,10 @@ public class ReplicationLogGroupTest {
         // Append some data
         logGroup.append(tableName, commitId, put);
 
-        // Try to sync and expect it to timeout
-        try {
-            logGroup.sync();
-            fail("Expected sync to timeout");
-        } catch (IOException e) {
-            assertTrue("Expected timeout exception", e.getCause() instanceof TimeoutException);
-        }
+        // sync on the original writer will timeout but then we will switch mode and succeed
+        logGroup.sync();
+        assertTrue(innerWriter != logGroup.getActiveLog().getWriter());
+        assertEquals(ReplicationMode.State.STORE_AND_FORWARD, logGroup.mode.getState());
     }
 
     /**
@@ -1233,6 +1230,58 @@ public class ReplicationLogGroupTest {
 
         // Clean up
         g1_3.close();
+    }
+
+    @Test
+    public void testInFlightAppendsReplayAfterModeSwitch() throws Exception {
+        final String tableName = "TESTTBL";
+        final long commitId1 = 1L;
+        final long commitId2 = 2L;
+        final long commitId3 = 3L;
+        final long commitId4 = 4L;
+        final long commitId5 = 5L;
+        final Mutation put1 = LogFileTestUtil.newPut("row1", 1, 1);
+        final Mutation put2 = LogFileTestUtil.newPut("row2", 2, 1);
+        final Mutation put3 = LogFileTestUtil.newPut("row3", 3, 1);
+        final Mutation put4 = LogFileTestUtil.newPut("row4", 4, 1);
+        final Mutation put5 = LogFileTestUtil.newPut("row5", 5, 1);
+
+        // Get the inner writer
+        ReplicationLog activeLog = logGroup.getActiveLog();
+        LogFileWriter writer = activeLog.getWriter();
+        assertNotNull("Writer should not be null", writer);
+        // keep returning the same writer
+        doAnswer(invocation -> writer).when(activeLog).createNewWriter();
+
+        logGroup.append(tableName, commitId1, put1);
+        logGroup.append(tableName, commitId2, put2);
+        logGroup.append(tableName, commitId3, put3);
+        logGroup.append(tableName, commitId4, put4);
+
+        // configure writer to throw IOException on the 5th append
+        doThrow(new IOException("Simulate append failure"))
+                .when(writer).append(tableName, commitId5, put5);
+
+        logGroup.append(tableName, commitId5, put5);
+        logGroup.sync();
+
+        LogFileWriter storeAndForwardWriter = logGroup.getActiveLog().getWriter();
+        assertTrue("After switching mode we should have a new writer",
+                writer != storeAndForwardWriter);
+        InOrder inOrder = Mockito.inOrder(storeAndForwardWriter);
+
+        // verify that all the in-flight appends and syncs are replayed on the new store and forward writer
+        inOrder.verify(storeAndForwardWriter, times(1))
+                .append(eq(tableName), eq(commitId1), eq(put1));
+        inOrder.verify(storeAndForwardWriter, times(1))
+                .append(eq(tableName), eq(commitId2), eq(put2));
+        inOrder.verify(storeAndForwardWriter, times(1))
+                .append(eq(tableName), eq(commitId3), eq(put3));
+        inOrder.verify(storeAndForwardWriter, times(1))
+                .append(eq(tableName), eq(commitId4), eq(put4));
+        inOrder.verify(storeAndForwardWriter, times(1))
+                .append(eq(tableName), eq(commitId5), eq(put5));
+        inOrder.verify(storeAndForwardWriter, times(1)).sync();
     }
 
     static class TestableLogGroup extends ReplicationLogGroup {
