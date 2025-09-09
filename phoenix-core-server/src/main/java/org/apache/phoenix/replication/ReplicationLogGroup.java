@@ -184,7 +184,7 @@ public class ReplicationLogGroup {
      * Mode transitions occur automatically based on the availability of the standby cluster's HDFS
      * and the state of the local mutation queue.
      */
-    interface ReplicationMode {
+    protected abstract static class ReplicationMode {
         enum State {
             /**
              *
@@ -212,38 +212,65 @@ public class ReplicationLogGroup {
             SYNC_AND_FORWARD
         }
 
+        private final State state;
+        protected ReplicationLog log;
+
+        protected ReplicationMode(State state) {
+            this.state = state;
+        }
+
         /**
          *
          * @throws IOException
          */
-        void onEnter() throws IOException;
+        abstract void onEnter() throws IOException;
 
         /**
          *
          */
-        void onExit();
+        abstract void onExit();
 
         /**
          *
          * @param e
          * @throws IOException
          */
-        void onFailure(Throwable e) throws IOException;
+        abstract void onFailure(Throwable e) throws IOException;
 
         /**
          *
          * @return
          */
-        ReplicationLog getReplicationLog();
+        ReplicationLog getReplicationLog() {
+            return log;
+        }
 
-        void close();
+        void close() {
+            if (log != null) {
+                log.close();
+            }
+        }
 
-        void closeOnError();
+        void closeOnError() {
+            if (log != null) {
+                log.closeOnError();
+            }
+        }
 
-        State getState();
+        State getState() {
+            return state;
+        }
+
+        @Override
+        public String toString() {
+            return getState().name();
+        }
     }
 
-    protected class Init implements ReplicationMode {
+    protected class Init extends ReplicationMode {
+        Init() {
+            super(INIT);
+        }
 
         @Override
         public void onEnter() throws IOException {}
@@ -255,42 +282,22 @@ public class ReplicationLogGroup {
         public void onFailure(Throwable e) throws IOException {
             throw new UnsupportedOperationException("Not supported for " + this);
         }
-
-        @Override
-        public ReplicationLog getReplicationLog() {
-            throw new UnsupportedOperationException("Not supported for " + this);
-        }
-
-        @Override
-        public void close() {}
-
-        @Override
-        public void closeOnError() {}
-
-        @Override
-        public State getState() {
-            return INIT;
-        }
-
-        @Override
-        public String toString() {
-            return getState().name();
-        }
     }
 
-    protected class Sync implements ReplicationMode {
-
-        private ReplicationLog remoteLog;
+    protected class Sync extends ReplicationMode {
+        Sync() {
+            super(SYNC);
+        }
 
         @Override
         public void onEnter() throws IOException {
-            remoteLog = createRemoteLog();
-            remoteLog.init();
+            log = createRemoteLog();
+            log.init();
         }
 
         @Override
         public void onExit() {
-            getReplicationLog().close();
+            close();
         }
 
         @Override
@@ -309,61 +316,22 @@ public class ReplicationLogGroup {
                 throw new IOException(ex);
             }
         }
-
-        @Override
-        public ReplicationLog getReplicationLog() {
-            return remoteLog;
-        }
-
-        @Override
-        public void close() {
-            getReplicationLog().close();
-        }
-
-        @Override
-        public void closeOnError() {
-            getReplicationLog().closeOnError();
-        }
-
-        @Override
-        public State getState() {
-            return SYNC;
-        }
-
-        @Override
-        public String toString() {
-            return getState().name();
-        }
     }
 
-    protected class StoreAndForward implements ReplicationMode {
-
-        private ReplicationLog localLog;
+    protected class StoreAndForward extends ReplicationMode {
+        StoreAndForward() {
+            super(STORE_AND_FORWARD);
+        }
 
         @Override
         public void onEnter() throws IOException {
-            localLog = createLocalLog();
-            localLog.init();
+            log = createLocalLog();
+            log.init();
         }
 
         @Override
         public void onExit() {
-            getReplicationLog().close();
-        }
-
-        @Override
-        public ReplicationLog getReplicationLog() {
-            return localLog;
-        }
-
-        @Override
-        public void close() {
-            getReplicationLog().close();
-        }
-
-        @Override
-        public void closeOnError() {
-            getReplicationLog().closeOnError();
+            close();
         }
 
         @Override
@@ -375,28 +343,39 @@ public class ReplicationLogGroup {
                 throw new IOException(e.getCause());
             }
         }
-
-        @Override
-        public State getState() {
-            return STORE_AND_FORWARD;
-        }
-
-        @Override
-        public String toString() {
-            return getState().name();
-        }
     }
 
-    protected class SyncAndForward extends Sync {
-
-        @Override
-        public State getState() {
-            return SYNC_AND_FORWARD;
+    protected class SyncAndForward extends ReplicationMode {
+        SyncAndForward() {
+            super(SYNC_AND_FORWARD);
         }
 
         @Override
-        public String toString() {
-            return getState().name();
+        public void onEnter() throws IOException {
+            log = createRemoteLog();
+            log.init();
+        }
+
+        @Override
+        public void onExit() {
+            close();
+        }
+
+        @Override
+        public void onFailure(Throwable e) throws IOException {
+            try {
+                LOG.info("{} mode={} got error", haGroupName, this, e);
+                haGroupStoreManager.setHAGroupStatusToStoreAndForward(haGroupName);
+                switchMode(new StoreAndForward());
+            }
+            catch (IOException ex) {
+                // TODO logging
+                throw ex;
+            }
+            catch (Exception ex) {
+                // TODO logging
+                throw new IOException(ex);
+            }
         }
     }
 
