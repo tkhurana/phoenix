@@ -411,6 +411,7 @@ public class ReplicationLog {
      */
     protected void closeCurrentWriter() {
         closeWriter(currentWriter);
+        currentWriter = null;
     }
 
     /**
