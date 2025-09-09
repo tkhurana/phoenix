@@ -1301,14 +1301,16 @@ public class ReplicationLogGroupTest {
 
         @Override
         protected ReplicationLog createRemoteLog() throws IOException {
-            ReplicationLog log = spy(new TestableLog(this, remoteUri));
+            ReplicationLog log = spy(
+                    new TestableLog(this, remoteUri, ReplicationLogGroup.REMOTE_DIR));
             log.init();
             return log;
         }
 
         @Override
         protected ReplicationLog createLocalLog() throws IOException {
-            ReplicationLog log = spy(new TestableLog(this, localUri));
+            ReplicationLog log = spy(
+                    new TestableLog(this, localUri, ReplicationLogGroup.LOCAL_DIR));
             log.init();
             return log;
         }
@@ -1320,8 +1322,8 @@ public class ReplicationLogGroupTest {
      */
     static class TestableLog extends ReplicationLog {
 
-        public TestableLog(ReplicationLogGroup logGroup, URI uri) {
-            super(logGroup, uri);
+        public TestableLog(ReplicationLogGroup logGroup, URI uri, String logDirName) {
+            super(logGroup, uri, logDirName);
         }
 
         @Override

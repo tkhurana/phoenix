@@ -111,7 +111,8 @@ public class ReplicationLog {
     protected final ReentrantLock lock = new ReentrantLock();
     protected final int maxAttempts;    // Configurable max retries for sync
     protected final long retryDelayMs; // Configurable delay between retries
-    protected URI logURI;
+    protected final URI logURI;
+    protected final String logDirName;
     protected FileSystem logFs;
     private Path haGroupLogFilesPath;
     protected volatile LogFileWriter currentWriter;
@@ -137,7 +138,7 @@ public class ReplicationLog {
         ERROR
     }
 
-    protected ReplicationLog(ReplicationLogGroup logGroup, URI logURI) {
+    protected ReplicationLog(ReplicationLogGroup logGroup, URI logURI, String logDirName) {
         this.logGroup = logGroup;
         Configuration conf = logGroup.getConfiguration();
         this.maxAttempts = conf.getInt(ReplicationLogGroup.REPLICATION_LOG_SYNC_RETRIES_KEY,
@@ -172,6 +173,7 @@ public class ReplicationLog {
         }
         this.compression = compression;
         this.logURI = logURI;
+        this.logDirName = logDirName;
     }
 
 
@@ -199,7 +201,7 @@ public class ReplicationLog {
      */
     protected void initializeReplicationShardDirectoryManager() {
         this.haGroupLogFilesPath = new Path(new Path(logURI.getPath(), logGroup.getHaGroupName()),
-                ReplicationLogReplayFileTracker.IN_SUBDIRECTORY);
+                this.logDirName);
         this.replicationShardDirectoryManager = new ReplicationShardDirectoryManager(
                 logGroup.getConfiguration(), haGroupLogFilesPath);
     }

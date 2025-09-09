@@ -117,6 +117,8 @@ public class ReplicationLogGroup {
     public static final long DEFAULT_REPLICATION_LOG_RETRY_DELAY_MS = 100L;
 
     public static final String FILE_NAME_FORMAT = "%d_%s.plog";
+    public static final String REMOTE_DIR = "in";
+    public static final String LOCAL_DIR = "out";
 
     /** Cache of ReplicationLogGroup instances by HA Group ID */
     protected static final ConcurrentHashMap<String, ReplicationLogGroup> INSTANCES =
@@ -924,14 +926,14 @@ public class ReplicationLogGroup {
     /** Create the remote (synchronous) writer. Mainly for tests. */
     protected ReplicationLog createRemoteLog() throws IOException {
         URI remoteURI = getLogURI(ReplicationLogGroup.REPLICATION_REMOTE_HDFS_URL_KEY);
-        ReplicationLog log = new ReplicationLog(this, remoteURI);
+        ReplicationLog log = new ReplicationLog(this, remoteURI, REMOTE_DIR);
         return log;
     }
 
     /** Create the local (store and forward) writer. Mainly for tests. */
     protected ReplicationLog createLocalLog() throws IOException {
         URI localURI = getLogURI(ReplicationLogGroup.REPLICATION_LOCAL_HDFS_URL_KEY);
-        ReplicationLog log = new ReplicationLog(this, localURI);
+        ReplicationLog log = new ReplicationLog(this, localURI, LOCAL_DIR);
         return log;
     }
 
