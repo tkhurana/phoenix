@@ -331,7 +331,7 @@ public class ReplicationLogGroupTest {
         // sync on the original writer will timeout but then we will switch mode and succeed
         logGroup.sync();
         assertTrue(innerWriter != logGroup.getActiveLog().getWriter());
-        assertEquals(ReplicationMode.State.STORE_AND_FORWARD, logGroup.mode.getState());
+        assertEquals(ReplicationMode.State.STORE_AND_FORWARD, logGroup.getMode().getState());
     }
 
     /**
@@ -675,7 +675,7 @@ public class ReplicationLogGroupTest {
         // a mode switch to STORE_AND_FORWARD
         logGroup.append(tableName, commitId + 1, put);
         logGroup.sync();
-        assertEquals(ReplicationMode.State.STORE_AND_FORWARD, logGroup.mode.getState());
+        assertEquals(ReplicationMode.State.STORE_AND_FORWARD, logGroup.getMode().getState());
     }
 
     /**
@@ -749,7 +749,7 @@ public class ReplicationLogGroupTest {
 
         // Each retry creates a new writer, so that is at least 1 create + 4 retries.
         verify(activeLog, atLeast(5)).createNewWriter();
-        assertEquals(ReplicationMode.State.STORE_AND_FORWARD, logGroup.mode.getState());
+        assertEquals(ReplicationMode.State.STORE_AND_FORWARD, logGroup.getMode().getState());
     }
 
     /**

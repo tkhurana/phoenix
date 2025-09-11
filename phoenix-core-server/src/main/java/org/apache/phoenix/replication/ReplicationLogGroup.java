@@ -36,6 +36,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
@@ -130,7 +131,7 @@ public class ReplicationLogGroup {
     protected final HAGroupStoreManager haGroupStoreManager;
     protected final MetricsReplicationLogGroupSource metrics;
     protected long syncTimeoutMs;
-    protected ReplicationMode mode;
+    private AtomicReference<ReplicationMode> mode = new AtomicReference<>();
     protected volatile boolean closed = false;
 
     protected static class Record {
@@ -439,7 +440,7 @@ public class ReplicationLogGroup {
         this.haGroupName = haGroupName;
         this.haGroupStoreManager = haGroupStoreManager;
         this.metrics = createMetricsSource();
-        this.mode = new Init();
+        this.mode.set(new Init());
     }
 
     /**
@@ -772,6 +773,7 @@ public class ReplicationLogGroup {
      */
     protected void syncInternal() throws IOException {
         CompletableFuture<Void> syncFuture = new CompletableFuture<>();
+        ReplicationMode current = getMode();
         long sequence = ringBuffer.next();
         try {
             LogEvent event = ringBuffer.get(sequence);
@@ -796,7 +798,7 @@ public class ReplicationLogGroup {
         } catch (TimeoutException e) {
             String message = "Sync operation timed out";
             LOG.error(message);
-            mode.onFailure(new IOException(message, e));
+            current.onFailure(new IOException(message, e));
             // gracefully handled the failure, retry the sync
             syncInternal();
         }
@@ -831,7 +833,7 @@ public class ReplicationLogGroup {
         // Directly halt the disruptor. shutdown() would wait for events to drain. We are expecting
         // that will not work.
         disruptor.halt();
-        mode.closeOnError();
+        getMode().closeOnError();
         metrics.close();
         LOG.info("Closed on error replicationLogGroup for HA Group: {}", haGroupName);
     }
@@ -861,7 +863,7 @@ public class ReplicationLogGroup {
             }
             // TODO revisit close logic and the below comment
             // We must wait for the disruptor before closing the writers.
-            mode.close();
+            getMode().close();
             metrics.close();
             LOG.info("Closed ReplicationLogGroup for HA Group: {}", haGroupName);
         }
@@ -873,36 +875,37 @@ public class ReplicationLogGroup {
      * @param newMode The new replication mode
      * @throws IOException If the mode switch fails
      */
-    protected void switchMode(ReplicationMode newMode) throws IOException {
-        if (mode.getState().equals(newMode.getState())) {
+    private synchronized void switchMode(ReplicationMode newMode) throws IOException {
+        ReplicationMode current = getMode();
+        if (current.getState().equals(newMode.getState())) {
             LOG.info("HA group {} is already in new mode {}", this, newMode);
             return;
         }
-        EnumSet<ReplicationMode.State> allowedToStates = allowedTransition.get(this.mode.getState());
+        EnumSet<ReplicationMode.State> allowedToStates = allowedTransition.get(current.getState());
         if (allowedToStates == null || !allowedToStates.contains(newMode.getState())) {
             throw new DoNotRetryIOException("Can not transit HA Group " + haGroupName +
-                    " mode from " + this.mode + " to " + newMode);
+                    " mode from " + current + " to " + newMode);
         }
         LOG.info("Attempting to switch replication mode for HA Group: {} from {} to {}",
-                this, mode, newMode);
+                this, current, newMode);
 
         try {
             // exit the current mode
-            mode.onExit();
+            current.onExit();
             // make the switch
-            mode = newMode;
+            mode.set(newMode);
             // enter the new mode
-            mode.onEnter();
+            getMode().onEnter();
         } catch (IOException e) {
             try {
                 //TODO logging
-                mode.onFailure(e);
+                getMode().onFailure(e);
             } catch (IOException ex) {
                 //TODO logging
                 throw ex;
             }
         }
-        LOG.info("Switched replication mode for HA Group: {} to {}", this, this.mode);
+        LOG.info("Switched replication mode for HA Group: {} to {}", this, getMode());
     }
 
     /** Get the current metrics source for monitoring operations. */
@@ -942,7 +945,7 @@ public class ReplicationLogGroup {
     }
 
     protected ReplicationMode getMode() {
-        return mode;
+        return mode.get();
     }
 
     /** Returns the currently active writer. Mainly for tests. */
