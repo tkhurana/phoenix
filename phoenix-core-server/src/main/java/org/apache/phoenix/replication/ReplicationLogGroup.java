@@ -540,30 +540,32 @@ public class ReplicationLogGroup {
          * @param e
          */
         private void onFailure(LogEvent failedEvent,
-                               ReplicationLog currentLog,
+                               ReplicationMode currentMode,
                                long sequence,
                                IOException e) throws IOException {
-            // Trying do the mode switch
-            mode.onFailure(e);
+            // Send the failed event to the current mode
+            // this can potentially trigger a mode switch
+            currentMode.onFailure(e);
             // retry the batch
-            replayBatch(failedEvent, currentLog, sequence);
+            replayBatch(failedEvent, currentMode, sequence);
         }
 
         private void replayBatch(LogEvent failedEvent,
-                                 ReplicationLog oldLog,
+                                 ReplicationMode oldMode,
                                  long sequence) throws IOException {
-            ReplicationLog newlog = getActiveLog();
+            ReplicationLog oldLog = oldMode.getReplicationLog();
+            ReplicationLog newLog = getActiveLog();
             // first replay all appends which were successful but not synced to the old log
             for (Record r : oldLog.getCurrentBatch()) {
-                newlog.append(r);
+                newLog.append(r);
             }
             // now retry the event which failed
             // only need to retry append event since for sync event we have already added the
             // sync event future to the pending future list
             if (failedEvent.type == EVENT_TYPE_DATA) {
-                newlog.append(failedEvent.record);
+                newLog.append(failedEvent.record);
             }
-            processPendingSyncs(newlog, sequence);
+            processPendingSyncs(newLog, sequence);
         }
 
         /**
@@ -603,8 +605,10 @@ public class ReplicationLogGroup {
             long ringBufferTimeNs = currentTimeNs - event.timestampNs;
             metrics.updateRingBufferTime(ringBufferTimeNs);
 
-            // find the current active log to which the event needs to be sent to
-            ReplicationLog log = getActiveLog();
+            // save the mode we are sending the event to
+            ReplicationMode current = getMode();
+            // find the log to which the event needs to be sent to
+            ReplicationLog log = current.getReplicationLog();
             try {
                 switch (event.type) {
                     case EVENT_TYPE_DATA:
@@ -631,7 +635,7 @@ public class ReplicationLogGroup {
             } catch (IOException e) {
                 try {
                     LOG.info("Failed to process event at sequence {} on log {}", sequence, log, e);
-                    onFailure(event, log, sequence, e);
+                    onFailure(event, current, sequence, e);
                 } catch (IOException e1) {
                     // Either we failed to switch the mode or we are in STORE_AND_FORWARD mode
                     // and got an exception
@@ -937,8 +941,12 @@ public class ReplicationLogGroup {
         return log;
     }
 
+    protected ReplicationMode getMode() {
+        return mode;
+    }
+
     /** Returns the currently active writer. Mainly for tests. */
     protected ReplicationLog getActiveLog() {
-        return mode.getReplicationLog();
+        return getMode().getReplicationLog();
     }
 }

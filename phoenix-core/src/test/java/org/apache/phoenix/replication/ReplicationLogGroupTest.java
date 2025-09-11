@@ -52,6 +52,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.ipc.CallTimeoutException;
 import org.apache.phoenix.jdbc.HAGroupStoreManager;
 import org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode;
 import org.apache.phoenix.replication.log.LogFileWriter;
@@ -1281,6 +1282,39 @@ public class ReplicationLogGroupTest {
                 .append(eq(tableName), eq(commitId4), eq(put4));
         inOrder.verify(storeAndForwardWriter, times(1))
                 .append(eq(tableName), eq(commitId5), eq(put5));
+        inOrder.verify(storeAndForwardWriter, times(1)).sync();
+    }
+
+    @Test
+    public void testAppendTimeoutWhileSyncPending() throws Exception {
+        final String tableName = "TESTTBL";
+        final long commitId1 = 1L;
+        final Mutation put1 = LogFileTestUtil.newPut("row1", 1, 1);
+
+        // Get the inner writer
+        ReplicationLog activeLog = logGroup.getActiveLog();
+        LogFileWriter writer = activeLog.getWriter();
+        assertNotNull("Writer should not be null", writer);
+        // keep returning the same writer
+        //doAnswer(invocation -> writer).when(activeLog).createNewWriter();
+        doAnswer(new Answer<Object>() {
+            @Override
+            public Object answer(InvocationOnMock invocation) throws Throwable {
+                Thread.sleep((long)(TEST_SYNC_TIMEOUT * 1.25)); // Simulate slow append processing
+                throw new CallTimeoutException("Simulate append timeout");
+            }
+        }).when(writer).append(anyString(), anyLong(), any(Mutation.class));
+
+        logGroup.append(tableName, commitId1, put1);
+        logGroup.sync();
+
+        LogFileWriter storeAndForwardWriter = logGroup.getActiveLog().getWriter();
+        assertTrue("After switching mode we should have a new writer",
+                writer != storeAndForwardWriter);
+        InOrder inOrder = Mockito.inOrder(storeAndForwardWriter);
+        // verify that all the in-flight appends and syncs are replayed on the new store and forward writer
+        inOrder.verify(storeAndForwardWriter, times(1))
+                .append(eq(tableName), eq(commitId1), eq(put1));
         inOrder.verify(storeAndForwardWriter, times(1)).sync();
     }
 
