@@ -216,6 +216,8 @@ public class ReplicationLogGroup {
         }
 
         private final State state;
+
+        // The mode manages the underlying log to which the append and sync events will be sent
         protected ReplicationLog log;
 
         protected ReplicationMode(State state) {
@@ -248,6 +250,14 @@ public class ReplicationLogGroup {
             return log;
         }
 
+        void append(Record r) throws IOException {
+            getReplicationLog().append(r);
+        }
+
+        void sync() throws IOException {
+            getReplicationLog().sync();
+        }
+
         void close() {
             if (log != null) {
                 log.close();
@@ -276,15 +286,26 @@ public class ReplicationLogGroup {
         }
 
         @Override
-        public void onEnter() throws IOException {}
+        void onEnter() throws IOException {}
 
         @Override
-        public void onExit() {}
+        void onExit() {}
 
         @Override
-        public void onFailure(Throwable e) throws IOException {
+        void onFailure(Throwable e) throws IOException {
             throw new UnsupportedOperationException("Not supported for " + this);
         }
+
+        @Override
+        void append(Record r) throws IOException {
+            throw new UnsupportedOperationException("Not supported for " + this);
+        }
+
+        @Override
+        void sync() throws IOException {
+            throw new UnsupportedOperationException("Not supported for " + this);
+        }
+
     }
 
     protected class Sync extends ReplicationMode {
@@ -496,15 +517,15 @@ public class ReplicationLogGroup {
          *   <li>Clears the list of pending sync futures.</li>
          *   <li>Clears the current batch of records since they have been successfully synced.</li>
          * </ol>
-         * @param log The which should process the sync event
+         * @param mode The mode which should process the sync event
          * @param sequence The sequence number of the last processed event
          * @throws IOException if the sync operation fails
          */
-        private void processPendingSyncs(ReplicationLog log, long sequence) throws IOException {
+        private void processPendingSyncs(ReplicationMode mode, long sequence) throws IOException {
             if (pendingSyncFutures.isEmpty()) {
                 return;
             }
-            log.sync();
+            mode.sync();
             // Complete all pending sync futures
             for (CompletableFuture<Void> future : pendingSyncFutures) {
                 future.complete(null);
@@ -555,18 +576,18 @@ public class ReplicationLogGroup {
                                  ReplicationMode oldMode,
                                  long sequence) throws IOException {
             ReplicationLog oldLog = oldMode.getReplicationLog();
-            ReplicationLog newLog = getActiveLog();
+            ReplicationMode current = getMode();
             // first replay all appends which were successful but not synced to the old log
             for (Record r : oldLog.getCurrentBatch()) {
-                newLog.append(r);
+                current.append(r);
             }
             // now retry the event which failed
             // only need to retry append event since for sync event we have already added the
             // sync event future to the pending future list
             if (failedEvent.type == EVENT_TYPE_DATA) {
-                newLog.append(failedEvent.record);
+                current.append(failedEvent.record);
             }
-            processPendingSyncs(newLog, sequence);
+            processPendingSyncs(current, sequence);
         }
 
         /**
@@ -606,17 +627,15 @@ public class ReplicationLogGroup {
             long ringBufferTimeNs = currentTimeNs - event.timestampNs;
             metrics.updateRingBufferTime(ringBufferTimeNs);
 
-            // save the mode we are sending the event to
+            // get the mode we are sending the event to
             ReplicationMode current = getMode();
-            // find the log to which the event needs to be sent to
-            ReplicationLog log = current.getReplicationLog();
             try {
                 switch (event.type) {
                     case EVENT_TYPE_DATA:
-                        log.append(event.record);
+                        current.append(event.record);
                         // Process any pending syncs at the end of batch.
                         if (endOfBatch) {
-                            processPendingSyncs(log, sequence);
+                            processPendingSyncs(current, sequence);
                         }
                         return;
                     case EVENT_TYPE_SYNC:
@@ -626,7 +645,7 @@ public class ReplicationLogGroup {
                         pendingSyncFutures.add(event.syncFuture);
                         // Process any pending syncs at the end of batch.
                         if (endOfBatch) {
-                            processPendingSyncs(log, sequence);
+                            processPendingSyncs(current, sequence);
                         }
                         return;
                     default:
@@ -635,7 +654,7 @@ public class ReplicationLogGroup {
                 }
             } catch (IOException e) {
                 try {
-                    LOG.info("Failed to process event at sequence {} on log {}", sequence, log, e);
+                    LOG.info("Failed to process event at sequence {} on mode {}", sequence, current, e);
                     onFailure(event, current, sequence, e);
                 } catch (IOException e1) {
                     // Either we failed to switch the mode or we are in STORE_AND_FORWARD mode
