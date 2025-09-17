@@ -64,7 +64,7 @@ public class ServerPagingIT extends ParallelStatsDisabledIT {
   @BeforeClass
   public static synchronized void doSetup() throws Exception {
     Map<String, String> props = Maps.newHashMapWithExpectedSize(2);
-    props.put(QueryServices.PHOENIX_SERVER_PAGE_SIZE_MS, Long.toString(10));
+    props.put(QueryServices.PHOENIX_SERVER_PAGE_SIZE_MS, Long.toString(0));
     props.put(QueryServices.COLLECT_REQUEST_LEVEL_METRICS, String.valueOf(true));
     setUpTestDriver(new ReadOnlyProps(props.entrySet().iterator()));
   }
@@ -270,6 +270,9 @@ public class ServerPagingIT extends ParallelStatsDisabledIT {
   public void testAggregateQuery() throws Exception {
     final String tablename = generateUniqueName();
     Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
+    // use a higher timeout value so that we can trigger a page timeout from the scanner
+    // rather than the page filter
+    props.put(QueryServices.PHOENIX_SERVER_PAGE_SIZE_MS, Long.toString(10));
     String ddl = "CREATE TABLE " + tablename + " (id VARCHAR NOT NULL,\n" + "k1 INTEGER NOT NULL,\n"
             + "k2 INTEGER NOT NULL,\n" + "k3 INTEGER,\n" + "v1 VARCHAR,\n"
             + "CONSTRAINT pk PRIMARY KEY (id, k1, k2)) ";
@@ -277,7 +280,8 @@ public class ServerPagingIT extends ParallelStatsDisabledIT {
       createTestTable(getUrl(), ddl);
       String dml = "UPSERT INTO " + tablename + " VALUES(?, ?, ?, ?, ?)";
       PreparedStatement ps = conn.prepareStatement(dml);
-      for (int i = 0; i < 10000; ++i) {
+      int totalRows = 10000;
+      for (int i = 0; i < totalRows; ++i) {
         ps.setString(1, "id_" + i % 3);
         ps.setInt(2, i % 20);
         ps.setInt(3, i);
@@ -291,11 +295,21 @@ public class ServerPagingIT extends ParallelStatsDisabledIT {
       conn.commit();
       String dql = String.format("SELECT count(*) from %s where id = '%s'", tablename, "id_2");
       try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
-        while (rs.next()) {
-          System.out.println(rs.getInt(1));
+        assertTrue(rs.next());
+        assertEquals(totalRows/3, rs.getInt(1));
+        assertFalse(rs.next());
+        assertServerPagingMetric(tablename, rs, false); // no dummy rows
+        Map<String, Map<MetricType, Long>> metrics = PhoenixRuntime.getRequestReadMetricInfo(rs);
+        for (Map.Entry<String, Map<MetricType, Long>> entry : metrics.entrySet()) {
+          Map<MetricType, Long> metricValues = entry.getValue();
+          Long rpcCalls = metricValues.get(MetricType.COUNT_RPC_CALLS);
+          assertNotNull(rpcCalls);
+          // multiple scan rpcs will be executed for every page timeout
+          assertTrue(String.format("Got %d", rpcCalls.longValue()), rpcCalls > 1);
         }
       }
 
+      /*
       ddl = String.format("alter table %s set \"%s\" = true", tablename,
               USE_BLOOMFILTER_FOR_MULTIKEY_POINTLOOKUP);
       conn.createStatement().execute(ddl);
@@ -322,7 +336,7 @@ public class ServerPagingIT extends ParallelStatsDisabledIT {
           System.out.println(String.format("%s,%d,%d",
                   rs.getString(1), rs.getInt(2), rs.getInt(3)));
         }
-      }
+      }*/
     }
   }
 
