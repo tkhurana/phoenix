@@ -64,7 +64,7 @@ public class ServerPagingIT extends ParallelStatsDisabledIT {
   @BeforeClass
   public static synchronized void doSetup() throws Exception {
     Map<String, String> props = Maps.newHashMapWithExpectedSize(2);
-    props.put(QueryServices.PHOENIX_SERVER_PAGE_SIZE_MS, Long.toString(0));
+    props.put(QueryServices.PHOENIX_SERVER_PAGE_SIZE_MS, Long.toString(10));
     props.put(QueryServices.COLLECT_REQUEST_LEVEL_METRICS, String.valueOf(true));
     setUpTestDriver(new ReadOnlyProps(props.entrySet().iterator()));
   }
@@ -262,6 +262,66 @@ public class ServerPagingIT extends ParallelStatsDisabledIT {
         assertEquals(D2.getTime(), rs.getDate(1).getTime());
         assertFalse(rs.next());
         assertServerPagingMetric(tablename, rs, true);
+      }
+    }
+  }
+
+  @Test
+  public void testAggregateQuery() throws Exception {
+    final String tablename = generateUniqueName();
+    Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
+    String ddl = "CREATE TABLE " + tablename + " (id VARCHAR NOT NULL,\n" + "k1 INTEGER NOT NULL,\n"
+            + "k2 INTEGER NOT NULL,\n" + "k3 INTEGER,\n" + "v1 VARCHAR,\n"
+            + "CONSTRAINT pk PRIMARY KEY (id, k1, k2)) ";
+    try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+      createTestTable(getUrl(), ddl);
+      String dml = "UPSERT INTO " + tablename + " VALUES(?, ?, ?, ?, ?)";
+      PreparedStatement ps = conn.prepareStatement(dml);
+      for (int i = 0; i < 10000; ++i) {
+        ps.setString(1, "id_" + i % 3);
+        ps.setInt(2, i % 20);
+        ps.setInt(3, i);
+        ps.setInt(4, i%10);
+        ps.setString(5, "val");
+        ps.executeUpdate();
+        if (i != 0 && i % 100 == 0) {
+          conn.commit();
+        }
+      }
+      conn.commit();
+      String dql = String.format("SELECT count(*) from %s where id = '%s'", tablename, "id_2");
+      try (ResultSet rs = conn.createStatement().executeQuery(dql)) {
+        while (rs.next()) {
+          System.out.println(rs.getInt(1));
+        }
+      }
+
+      ddl = String.format("alter table %s set \"%s\" = true", tablename,
+              USE_BLOOMFILTER_FOR_MULTIKEY_POINTLOOKUP);
+      conn.createStatement().execute(ddl);
+      dql = String.format("select id,k1,k2 from %s where (id, k1, k2) IN (" +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)," +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)," +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)," +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)," +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)," +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)," +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)," +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)," +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)," +
+              "(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)" +
+              ")", tablename);
+      ps = conn.prepareStatement(dql);
+      for (int i = 0; i < 100; i++) {
+        ps.setString(3*i + 1, "id_" + i %3);
+        ps.setInt(3*i + 2, i % 25);
+        ps.setInt(3*i + 3, i);
+      }
+      try(ResultSet rs = ps.executeQuery()) {
+        while(rs.next()) {
+          System.out.println(String.format("%s,%d,%d",
+                  rs.getString(1), rs.getInt(2), rs.getInt(3)));
+        }
       }
     }
   }
