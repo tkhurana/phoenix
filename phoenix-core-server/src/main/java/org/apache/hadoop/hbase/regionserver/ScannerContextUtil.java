@@ -75,6 +75,14 @@ public class ScannerContextUtil {
     return sc.checkTimeLimit(ScannerContext.LimitScope.BETWEEN_ROWS);
   }
 
+  public static Cell getLastPeekedCell(ScannerContext sc) {
+    return sc.getLastPeekedCell();
+  }
+
+  public static void copyLastPeekedCell(ScannerContext src, ScannerContext dst) {
+    dst.setLastPeekedCell(src.getLastPeekedCell());
+  }
+
   public static long getCountOfRowsScanned(ScannerContext sc) {
     return sc.getMetrics().getCounter(COUNT_OF_ROWS_SCANNED_KEY_METRIC_NAME).get();
   }

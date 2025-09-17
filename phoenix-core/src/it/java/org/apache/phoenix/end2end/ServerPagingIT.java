@@ -309,7 +309,6 @@ public class ServerPagingIT extends ParallelStatsDisabledIT {
         }
       }
 
-      /*
       ddl = String.format("alter table %s set \"%s\" = true", tablename,
               USE_BLOOMFILTER_FOR_MULTIKEY_POINTLOOKUP);
       conn.createStatement().execute(ddl);
@@ -336,7 +335,7 @@ public class ServerPagingIT extends ParallelStatsDisabledIT {
           System.out.println(String.format("%s,%d,%d",
                   rs.getString(1), rs.getInt(2), rs.getInt(3)));
         }
-      }*/
+      }
     }
   }
 

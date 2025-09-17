@@ -135,7 +135,6 @@ public class PagingRegionScanner extends BaseRegionScanner {
     private boolean next(List<Cell> results, boolean raw, RegionScanner scanner,
       ScannerContext scannerContext) throws IOException {
       try {
-        long startTime = EnvironmentEdgeManager.currentTimeMillis();
         while (true) {
           boolean hasMore;
           if (scannerContext != null) {
@@ -164,7 +163,7 @@ public class PagingRegionScanner extends BaseRegionScanner {
             return false;
           }
           LOGGER.info("Row key not found, keep going");
-          if (EnvironmentEdgeManager.currentTimeMillis() - startTime > pageSizeMs) {
+          if (EnvironmentEdgeManager.currentTimeMillis() - scanStartTime > pageSizeMs) {
             byte[] rowKey = pointLookupRanges.get(lookupPosition - 1).getLowerRange();
             ScanUtil.getDummyResult(rowKey, results);
             return true;
@@ -224,18 +223,15 @@ public class PagingRegionScanner extends BaseRegionScanner {
     if (scannerContext == null) {
       return false;
     }
+    LOGGER.info("{} {}", EnvironmentEdgeManager.currentTimeMillis() - scanStartTime, pageSizeMs);
     return EnvironmentEdgeManager.currentTimeMillis() - scanStartTime > pageSizeMs;
   }
 
   private boolean next(List<Cell> results, boolean raw, ScannerContext scannerContext)
     throws IOException {
     init();
-    if (scannerContext != null) {
-      LOGGER.info("Region {} next {} {}", getRegionInfo().getRegionNameAsString(),
-              scannerContext.hashCode(), scannerContext.getMetrics().countOfRowsScanned.get());
-    }
     // check if it is a new scan rpc request
-    if (scannerContext != null && isNewScanRequest(scannerContext)) {
+    if (scannerContext != null && isNewScanRpcRequest(scannerContext)) {
       // start a new page
       scanStartTime = EnvironmentEdgeManager.currentTimeMillis();
     }
@@ -279,18 +275,18 @@ public class PagingRegionScanner extends BaseRegionScanner {
       }
     }
 
+    boolean hasMore;
     if (multiKeyPointLookup != null) {
-      boolean retVal = multiKeyPointLookup.next(results, raw, delegate, scannerContext);
-      LOGGER.info("{} {} {} {}", retVal, EnvironmentEdgeManager.currentTimeMillis() - scanStartTime, pageSizeMs,
-              scannerContext.getMetrics().countOfRowsScanned.get());
-      if (retVal && isPageTimeout(scannerContext)) {
-        // TODO add comment why retVal should be true
+      hasMore = multiKeyPointLookup.next(results, raw, delegate, scannerContext);
+      if (hasMore && isPageTimeout(scannerContext)) {
+        // we have more rows to look, but we have hit a page timeout so return the rpc
+        LOGGER.info("{} Multi-key point lookup PagingRegionScanner timed out",
+                getRegionInfo().getRegionNameAsString());
         ScannerContextUtil.setReturnImmediately(scannerContext);
       }
-      return retVal;
+      return hasMore;
     }
 
-    boolean hasMore;
     if (scannerContext != null) {
       hasMore =
         raw ? delegate.nextRaw(results, scannerContext) : delegate.next(results, scannerContext);
@@ -306,11 +302,12 @@ public class PagingRegionScanner extends BaseRegionScanner {
       if (pagingFilter.isStopped()) {
         if (results.isEmpty()) {
           byte[] rowKey = pagingFilter.getCurrentRowKeyToBeExcluded();
-          LOGGER.info("Page filter stopped, generating dummy key {} ",
-            Bytes.toStringBinary(rowKey));
+          LOGGER.info("{} Paging filter stopped, generating dummy key {} ",
+                  getRegionInfo().getRegionNameAsString(), Bytes.toStringBinary(rowKey));
           ScanUtil.getDummyResult(rowKey, results);
         } else {
-          // TODO add comment
+          LOGGER.info("{} Paging filter stopped with a valid result",
+                  getRegionInfo().getRegionNameAsString());
           if (scannerContext != null) {
             ScannerContextUtil.setReturnImmediately(scannerContext);
           }
@@ -319,10 +316,11 @@ public class PagingRegionScanner extends BaseRegionScanner {
       }
       return false;
     } else {
-      // TODO fix comment below
       // We got a row from the HBase scanner within the configured time (i.e.,
-      // the page size). We need to start a new page on the next next() call.
+      // the page size).
       if (isPageTimeout(scannerContext)) {
+        // we have more rows to look, but we have hit a page timeout so return the rpc
+        LOGGER.info("{} PagingRegionScanner timed out", getRegionInfo().getRegionNameAsString());
         ScannerContextUtil.setReturnImmediately(scannerContext);
       }
       return true;
