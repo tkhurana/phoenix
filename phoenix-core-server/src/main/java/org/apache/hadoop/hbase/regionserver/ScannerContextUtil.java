@@ -17,6 +17,8 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import static org.apache.hadoop.hbase.client.metrics.ServerSideScanMetrics.COUNT_OF_ROWS_SCANNED_KEY_METRIC_NAME;
+
 import java.util.List;
 import java.util.Map;
 import org.apache.hadoop.hbase.Cell;
@@ -41,6 +43,14 @@ public class ScannerContextUtil {
     }
   }
 
+  public static void copyMetrics(ScannerContext src, ScannerContext dst) {
+    if (src != null && dst != null && src.isTrackingMetrics() && dst.isTrackingMetrics()) {
+      for (Map.Entry<String, Long> entry : src.getMetrics().getMetricsMap(false).entrySet()) {
+        dst.metrics.setCounter(entry.getKey(), entry.getValue());
+      }
+    }
+  }
+
   public static ScannerContext copyNoLimitScanner(ScannerContext sc) {
     return new ScannerContext(sc.keepProgress, null, sc.isTrackingMetrics());
   }
@@ -55,5 +65,17 @@ public class ScannerContextUtil {
    */
   public static void setReturnImmediately(ScannerContext sc) {
     sc.returnImmediately();
+  }
+
+  /**
+   * returnImmediately is a private field in ScannerContext and there is no getter API on it
+   * But the checkTimeLimit API on the ScannerContext will return true if returnImmediately is set
+   */
+  public static boolean checkTimeLimit(ScannerContext sc) {
+    return sc.checkTimeLimit(ScannerContext.LimitScope.BETWEEN_ROWS);
+  }
+
+  public static long getCountOfRowsScanned(ScannerContext sc) {
+    return sc.getMetrics().getCounter(COUNT_OF_ROWS_SCANNED_KEY_METRIC_NAME).get();
   }
 }
