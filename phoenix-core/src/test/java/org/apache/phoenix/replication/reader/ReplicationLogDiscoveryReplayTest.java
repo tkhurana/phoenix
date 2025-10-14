@@ -59,7 +59,7 @@ public class ReplicationLogDiscoveryReplayTest {
         conf = HBaseConfiguration.create();
         localFs = FileSystem.getLocal(conf);
         standbyUri = testFolder.getRoot().toURI();
-        conf.set(ReplicationLogGroup.REPLICATION_STANDBY_HDFS_URL_KEY, standbyUri.toString());
+        conf.set(ReplicationLogGroup.REPLICATION_REMOTE_HDFS_URL_KEY, standbyUri.toString());
     }
 
     @After

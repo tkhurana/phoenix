@@ -408,7 +408,8 @@ public class ReplicationLogGroup {
                     INIT, EnumSet.of(SYNC, STORE_AND_FORWARD),
                     SYNC, EnumSet.of(STORE_AND_FORWARD),
                     STORE_AND_FORWARD, EnumSet.of(SYNC_AND_FORWARD),
-                    SYNC_AND_FORWARD, EnumSet.of(SYNC, STORE_AND_FORWARD)));
+                    SYNC_AND_FORWARD, EnumSet.of(SYNC, STORE_AND_FORWARD))
+            );
 
     /**
      * Get or create a ReplicationLogGroup instance for the given HA Group.
@@ -577,7 +578,8 @@ public class ReplicationLogGroup {
                                  long sequence) throws IOException {
             ReplicationLog oldLog = oldMode.getReplicationLog();
             ReplicationMode current = getMode();
-            // first replay all appends which were successful but not synced to the old log
+            // first replay all appends which were successfully written to the old log
+            // but not yet synced
             for (Record r : oldLog.getCurrentBatch()) {
                 current.append(r);
             }

@@ -37,7 +37,6 @@ import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.phoenix.replication.ReplicationLogGroup.Record;
 import org.apache.phoenix.replication.log.LogFileWriter;
 import org.apache.phoenix.replication.log.LogFileWriterContext;
-import org.apache.phoenix.replication.reader.ReplicationLogReplayFileTracker;
 import org.apache.phoenix.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.slf4j.Logger;

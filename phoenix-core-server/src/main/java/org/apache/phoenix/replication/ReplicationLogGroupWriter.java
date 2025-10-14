@@ -39,7 +39,6 @@ import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.phoenix.replication.log.LogFileWriter;
 import org.apache.phoenix.replication.log.LogFileWriterContext;
-import org.apache.phoenix.replication.reader.ReplicationLogReplayFileTracker;
 import org.apache.phoenix.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.slf4j.Logger;
@@ -225,7 +224,7 @@ public abstract class ReplicationLogGroupWriter {
      */
     protected void initializeReplicationShardDirectoryManager() {
         this.haGroupLogFilesPath = new Path(new Path(logURI.getPath(), logGroup.getHaGroupName()),
-                ReplicationLogReplayFileTracker.IN_SUBDIRECTORY);
+                ReplicationLogTracker.DirectoryType.IN.getName());
         this.replicationShardDirectoryManager = new ReplicationShardDirectoryManager(
                 logGroup.getConfiguration(), haGroupLogFilesPath);
     }
