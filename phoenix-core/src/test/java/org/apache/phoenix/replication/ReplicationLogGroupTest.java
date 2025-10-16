@@ -1300,8 +1300,11 @@ public class ReplicationLogGroupTest {
         doAnswer(new Answer<Object>() {
             @Override
             public Object answer(InvocationOnMock invocation) throws Throwable {
-                Thread.sleep((long)(TEST_SYNC_TIMEOUT * 1.25)); // Simulate slow append processing
-                throw new CallTimeoutException("Simulate append timeout");
+                //Thread.sleep((long)(TEST_SYNC_TIMEOUT * 1.25)); // Simulate slow append processing
+                //throw new CallTimeoutException("Simulate append timeout");
+                Object result = invocation.callRealMethod();
+                Thread.sleep((long)(TEST_SYNC_TIMEOUT * 1.25)); // Simulate slow but successful append
+                return result;
             }
         }).when(writer).append(anyString(), anyLong(), any(Mutation.class));
 

@@ -537,7 +537,7 @@ public class ReplicationLogGroup {
                 future.complete(null);
             }
             pendingSyncFutures.clear();
-            LOG.trace("Sync operation completed successfully up to sequence {}", sequence);
+            LOG.info("Sync operation completed successfully up to sequence {}", sequence);
         }
 
         /**
