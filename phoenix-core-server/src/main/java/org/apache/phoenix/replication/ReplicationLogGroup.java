@@ -495,7 +495,7 @@ public class ReplicationLogGroup {
                         .setNameFormat("ReplicationLogGroup-" + getHaGroupName() + "-%d")
                         .setDaemon(true).build(),
                 ProducerType.MULTI, new YieldingWaitStrategy());
-        LogEventHandler eventHandler = new LogEventHandler();
+        LogEventHandler eventHandler = new LogEventHandler(getMode());
         disruptor.handleEventsWith(eventHandler);
         LogExceptionHandler exceptionHandler = new LogExceptionHandler();
         disruptor.setDefaultExceptionHandler(exceptionHandler);
@@ -507,6 +507,11 @@ public class ReplicationLogGroup {
      */
     protected class LogEventHandler implements EventHandler<LogEvent> {
         private final List<CompletableFuture<Void>> pendingSyncFutures = new ArrayList<>();
+        private ReplicationMode lastMode;
+
+        public LogEventHandler(ReplicationMode mode) {
+            this.lastMode = mode;
+        }
 
         /**
          * Processes all pending sync operations by syncing the current writer and completing
@@ -570,26 +575,33 @@ public class ReplicationLogGroup {
             // this can potentially trigger a mode switch
             currentMode.onFailure(e);
             // retry the batch
-            replayBatch(failedEvent, currentMode, sequence);
+            ReplicationMode newMode = getMode();
+            replayBatch(currentMode, newMode);
+            // retry the failed event
+            replayFailedEvent(failedEvent, newMode, sequence);
         }
 
-        private void replayBatch(LogEvent failedEvent,
-                                 ReplicationMode oldMode,
-                                 long sequence) throws IOException {
+        private void replayBatch(ReplicationMode oldMode,
+                                 ReplicationMode newMode) throws IOException {
             ReplicationLog oldLog = oldMode.getReplicationLog();
-            ReplicationMode current = getMode();
             // first replay all appends which were successfully written to the old log
             // but not yet synced
             for (Record r : oldLog.getCurrentBatch()) {
-                current.append(r);
+                newMode.append(r);
             }
+        }
+
+        private void replayFailedEvent(LogEvent failedEvent,
+                                       ReplicationMode currentMode,
+                                       long sequence) throws IOException {
             // now retry the event which failed
             // only need to retry append event since for sync event we have already added the
-            // sync event future to the pending future list
+            // sync event future to the pending future list before the sync event can potentially
+            // fail.
             if (failedEvent.type == EVENT_TYPE_DATA) {
-                current.append(failedEvent.record);
+                currentMode.append(failedEvent.record);
             }
-            processPendingSyncs(current, sequence);
+            processPendingSyncs(currentMode, sequence);
         }
 
         /**
@@ -632,6 +644,12 @@ public class ReplicationLogGroup {
             // get the mode we are sending the event to
             ReplicationMode current = getMode();
             try {
+                if (current != lastMode) {
+                    // some other thread switched the mode on the replication group
+                    LOG.info("Mode switched from {} to {}", lastMode, current);
+                    replayBatch(lastMode, current);
+                    lastMode = current;
+                }
                 switch (event.type) {
                     case EVENT_TYPE_DATA:
                         current.append(event.record);
