@@ -21,7 +21,7 @@ import java.io.IOException;
  * and the state of the local mutation queue.
  */
 public abstract class ReplicationMode {
-    enum State {
+    public enum State {
         /**
          *
          */
@@ -48,12 +48,14 @@ public abstract class ReplicationMode {
         SYNC_AND_FORWARD
     }
 
-    private final ReplicationLogGroup.ReplicationMode.State state;
+    protected final ReplicationLogGroup logGroup;
+    private final State state;
 
     // The mode manages the underlying log to which the append and sync events will be sent
     protected ReplicationLog log;
 
-    protected ReplicationMode(ReplicationLogGroup.ReplicationMode.State state) {
+    protected ReplicationMode(ReplicationLogGroup logGroup, State state) {
+        this.logGroup = logGroup;
         this.state = state;
     }
 
@@ -103,7 +105,7 @@ public abstract class ReplicationMode {
         }
     }
 
-    ReplicationLogGroup.ReplicationMode.State getState() {
+    State getState() {
         return state;
     }
 
