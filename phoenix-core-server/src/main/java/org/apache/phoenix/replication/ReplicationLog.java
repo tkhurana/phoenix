@@ -39,6 +39,7 @@ import org.apache.phoenix.replication.log.LogFileWriter;
 import org.apache.phoenix.replication.log.LogFileWriterContext;
 import org.apache.phoenix.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
+import org.apache.phoenix.util.LogUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -141,7 +142,7 @@ public class ReplicationLog {
         this.logGroup = logGroup;
         Configuration conf = logGroup.getConfiguration();
         this.maxAttempts = conf.getInt(ReplicationLogGroup.REPLICATION_LOG_SYNC_RETRIES_KEY,
-                ReplicationLogGroup.DEFAULT_REPLICATION_LOG_SYNC_RETRIES);
+                ReplicationLogGroup.DEFAULT_REPLICATION_LOG_SYNC_RETRIES) + 1;
         this.retryDelayMs =
                 conf.getLong(ReplicationLogGroup.REPLICATION_LOG_RETRY_DELAY_MS_KEY,
                         ReplicationLogGroup.DEFAULT_REPLICATION_LOG_RETRY_DELAY_MS);
@@ -470,8 +471,7 @@ public class ReplicationLog {
 
     protected void append(Record r) throws IOException {
         apply(writer -> writer.append(r.tableName, r.commitId, r.mutation));
-        // Add to current batch only after we succeed at appending, so we don't
-        // replay it twice.
+        // Add to current batch only after we succeed at appending
         currentBatch.add(r);
     }
 

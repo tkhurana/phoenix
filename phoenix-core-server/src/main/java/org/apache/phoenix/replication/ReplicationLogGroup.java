@@ -17,6 +17,8 @@
  */
 package org.apache.phoenix.replication;
 
+import static org.apache.hadoop.hbase.HConstants.DEFAULT_ZK_SESSION_TIMEOUT;
+import static org.apache.hadoop.hbase.HConstants.ZK_SESSION_TIMEOUT;
 import static org.apache.phoenix.replication.ReplicationLogGroup.LogEvent.EVENT_TYPE_DATA;
 import static org.apache.phoenix.replication.ReplicationLogGroup.LogEvent.EVENT_TYPE_SYNC;
 import static org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode.State.INIT;
@@ -42,6 +44,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableMap;
 import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
 import org.apache.phoenix.jdbc.HAGroupStoreManager;
@@ -109,13 +112,14 @@ public class ReplicationLogGroup {
     public static final long DEFAULT_REPLICATION_LOG_SYNC_TIMEOUT = 1000 * 30;
     public static final String REPLICATION_LOG_SYNC_RETRIES_KEY =
         "phoenix.replication.log.sync.retries";
-    public static final int DEFAULT_REPLICATION_LOG_SYNC_RETRIES = 5;
+    public static final int DEFAULT_REPLICATION_LOG_SYNC_RETRIES = 4;
     public static final String REPLICATION_LOG_ROTATION_RETRIES_KEY =
         "phoenix.replication.log.rotation.retries";
     public static final int DEFAULT_REPLICATION_LOG_ROTATION_RETRIES = 5;
     public static final String REPLICATION_LOG_RETRY_DELAY_MS_KEY =
         "phoenix.replication.log.retry.delay.ms";
     public static final long DEFAULT_REPLICATION_LOG_RETRY_DELAY_MS = 100L;
+    private static final long DEFAULT_HDFS_WRITE_RPC_TIMEOUT_MS = 30*1000;
 
     public static final String FILE_NAME_FORMAT = "%d_%s.plog";
     public static final String REMOTE_DIR = "in";
@@ -472,11 +476,26 @@ public class ReplicationLogGroup {
      */
     protected void init() throws IOException {
         initializeReplicationMode();
-        // initialize.
+        // if provided in the config use that else use a derived value
         this.syncTimeoutMs = conf.getLong(ReplicationLogGroup.REPLICATION_LOG_SYNC_TIMEOUT_KEY,
-                ReplicationLogGroup.DEFAULT_REPLICATION_LOG_SYNC_TIMEOUT);
+                calculateSyncTimeout());
         initializeDisruptor();
         LOG.info("Started ReplicationLogGroup for HA Group: {}", this);
+    }
+
+    /*
+     Return the sync timeout in ms
+    */
+    protected long calculateSyncTimeout() {
+        int maxAttempts = conf.getInt(REPLICATION_LOG_SYNC_RETRIES_KEY,
+                DEFAULT_REPLICATION_LOG_SYNC_RETRIES) + 1;
+        long retryDelayMs = conf.getLong(REPLICATION_LOG_RETRY_DELAY_MS_KEY,
+                DEFAULT_REPLICATION_LOG_RETRY_DELAY_MS);
+        long wrtiteRpcTimeout = conf.getLong(DFSConfigKeys.DFS_DATANODE_SOCKET_WRITE_TIMEOUT_KEY,
+                DEFAULT_HDFS_WRITE_RPC_TIMEOUT_MS);
+        long zkTimeoutMs = conf.getLong(ZK_SESSION_TIMEOUT, DEFAULT_ZK_SESSION_TIMEOUT);
+        long totalRpcTimeout =  maxAttempts*wrtiteRpcTimeout + (maxAttempts - 1)*retryDelayMs;
+        return 2*totalRpcTimeout + zkTimeoutMs;
     }
 
     protected void initializeReplicationMode() throws IOException {
@@ -646,7 +665,7 @@ public class ReplicationLogGroup {
             try {
                 if (current != lastMode) {
                     // some other thread switched the mode on the replication group
-                    LOG.info("Mode switched from {} to {}", lastMode, current);
+                    LOG.info("Mode switched at sequence {} from {} to {}", sequence, lastMode, current);
                     replayBatch(lastMode, current);
                     lastMode = current;
                 }
