@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.replication;
 
+import static java.lang.Thread.sleep;
 import static org.apache.phoenix.replication.ReplicationMode.State.STORE_AND_FORWARD;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -222,7 +223,7 @@ public class ReplicationLogGroupTest {
         doAnswer(new Answer<Object>() {
             @Override
             public Object answer(InvocationOnMock invocation) throws Throwable {
-                Thread.sleep(50); // Simulate slow processing
+                sleep(50); // Simulate slow processing
                 return invocation.callRealMethod();
             }
         }).when(innerWriter).append(anyString(), anyLong(), any(Mutation.class));
@@ -255,7 +256,7 @@ public class ReplicationLogGroupTest {
         assertFalse("Append should be blocked when ring is full", appendFuture.isDone());
 
         // Let some events process to free up space.
-        Thread.sleep(100);
+        sleep(100);
 
         // Now the append should complete. Any issues and we will time out here.
         appendFuture.get();
@@ -318,7 +319,7 @@ public class ReplicationLogGroupTest {
             @Override
             public Object answer(InvocationOnMock invocation) throws Throwable {
                 // Pause long enough to cause a timeout.
-                Thread.sleep((long)(TEST_SYNC_TIMEOUT * 1.25));
+                sleep((long)(TEST_SYNC_TIMEOUT * 1.25));
                 LOG.info("Waking up from sleep");
                 return invocation.callRealMethod();
             }
@@ -422,7 +423,7 @@ public class ReplicationLogGroupTest {
         logGroup.sync();
 
         // Wait for rotation time to elapse
-        Thread.sleep((long)(TEST_ROTATION_TIME * 1.25));
+        sleep((long)(TEST_ROTATION_TIME * 1.25));
 
         // Append more data to trigger rotation check
         logGroup.append(tableName, commitId + 1, put);
@@ -546,7 +547,7 @@ public class ReplicationLogGroupTest {
         // Append some data and wait for the rotation time to elapse plus a small buffer.
         logGroup.append(tableName, commitId, put);
         logGroup.sync();
-        Thread.sleep((long)(TEST_ROTATION_TIME * 1.25));
+        sleep((long)(TEST_ROTATION_TIME * 1.25));
 
         // Get the new writer after the rotation.
         LogFileWriter writerAfterRotation = logGroup.getActiveLog().getWriter();
@@ -749,6 +750,9 @@ public class ReplicationLogGroupTest {
         // Each retry creates a new writer, so that is at least 1 create + 4 retries.
         verify(activeLog, atLeast(5)).createNewWriter();
         assertEquals(STORE_AND_FORWARD, logGroup.getMode().getState());
+        /*while (true) {
+            sleep(500);
+        }*/
     }
 
     /**
@@ -771,7 +775,7 @@ public class ReplicationLogGroupTest {
         }
 
         // Force a rotation by waiting for rotation time to elapse
-        Thread.sleep((long)(TEST_ROTATION_TIME * 1.25));
+        sleep((long)(TEST_ROTATION_TIME * 1.25));
 
         // Get the new writer after rotation
         LogFileWriter writerAfterRotation = logGroup.getActiveLog().getWriter();
@@ -1140,7 +1144,7 @@ public class ReplicationLogGroupTest {
         doAnswer(new Answer<Object>() {
             @Override
             public Object answer(InvocationOnMock invocation) throws Throwable {
-                Thread.sleep(50); // Delay to allow multiple events to be posted
+                sleep(50); // Delay to allow multiple events to be posted
                 return invocation.callRealMethod();
             }
         }).when(innerWriter).append(eq(tableName), eq(commitId1), eq(put1));
@@ -1302,7 +1306,7 @@ public class ReplicationLogGroupTest {
                 //Thread.sleep((long)(TEST_SYNC_TIMEOUT * 1.25)); // Simulate slow append processing
                 //throw new CallTimeoutException("Simulate append timeout");
                 Object result = invocation.callRealMethod();
-                Thread.sleep((long)(TEST_SYNC_TIMEOUT * 1.25)); // Simulate slow but successful append
+                sleep((long)(TEST_SYNC_TIMEOUT * 1.25)); // Simulate slow but successful append
                 return result;
             }
         }).when(writer).append(anyString(), anyLong(), any(Mutation.class));

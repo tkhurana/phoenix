@@ -391,6 +391,7 @@ public class ReplicationLogGroup {
             // retry the batch
             ReplicationMode newMode = getMode();
             replayBatch(currentMode, newMode);
+            lastMode = newMode;
             // retry the failed event
             replayFailedEvent(failedEvent, newMode, sequence);
         }

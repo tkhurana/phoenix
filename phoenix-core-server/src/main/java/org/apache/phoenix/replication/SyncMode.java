@@ -27,6 +27,7 @@ public class SyncMode extends ReplicationMode {
     void onFailure(Throwable e) throws IOException {
         LOG.info("{} mode={} got error", logGroup, this, e);
         logGroup.setHAGroupStatusToStoreAndForward();
-        logGroup.switchMode(new StoreAndForwardMode(logGroup));
+        logGroup.switchMode(new StoreAndForwardMode(logGroup,
+                log.getFileSystem(), log.getHAGroupLogFilesDir()));
     }
 }

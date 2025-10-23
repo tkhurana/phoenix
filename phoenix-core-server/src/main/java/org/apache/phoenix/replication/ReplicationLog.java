@@ -327,6 +327,24 @@ public class ReplicationLog {
     }
 
     /**
+     * @return filesystem to which the log points to
+     */
+    protected FileSystem getFileSystem() {
+        return this.logFs;
+    }
+
+    /**
+     * @return directory where the log files are created
+     */
+    protected Path getHAGroupLogFilesDir() {
+        return haGroupLogFilesPath;
+    }
+
+    protected ReplicationShardDirectoryManager getReplicationShardDirectoryManager() {
+        return replicationShardDirectoryManager;
+    }
+
+    /**
      * Closes the current log writer and opens a new one, updating rotation metrics.
      * <p>
      * This method handles the rotation of log files, which can be triggered by:
