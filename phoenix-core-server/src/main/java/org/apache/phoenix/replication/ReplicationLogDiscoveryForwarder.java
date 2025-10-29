@@ -15,17 +15,20 @@ import org.slf4j.LoggerFactory;
 public class ReplicationLogDiscoveryForwarder extends ReplicationLogDiscovery {
     private static final Logger LOG = LoggerFactory.getLogger(ReplicationLogDiscoveryForwarder.class);
 
+    private final String serverName;
     private final FileSystem standbyFS;
     private final ReplicationShardDirectoryManager standbyShardDirectoryManager;
     private final ReplicationProbe probeHandler;
 
     public ReplicationLogDiscoveryForwarder(ReplicationLogTracker replicationLogTracker,
+                                            String serverName,
                                             FileSystem standbyFS,
-                                            Path standbyLogFilesPath,
+                                            Path standbyLogFilesDir,
                                             ReplicationProbe probeHandler) {
         super(replicationLogTracker);
+        this.serverName = serverName;
         this.standbyFS = standbyFS;
-        this.standbyShardDirectoryManager = new ReplicationShardDirectoryManager(conf, standbyLogFilesPath);
+        this.standbyShardDirectoryManager = new ReplicationShardDirectoryManager(conf, standbyLogFilesDir);
         this.probeHandler = probeHandler;
     }
 
@@ -35,12 +38,14 @@ public class ReplicationLogDiscoveryForwarder extends ReplicationLogDiscovery {
         FileStatus srcStat = srcFS.getFileStatus(src);
         long ts = EnvironmentEdgeManager.currentTimeMillis();
         Path dstDir = standbyShardDirectoryManager.getShardDirectory(ts);
+        Path dst = standbyShardDirectoryManager.getLogFilePathInShardDirectory(
+                dstDir, ts, serverName);
         long startTime = EnvironmentEdgeManager.currentTimeMillis();
-        FileUtil.copy(srcFS, srcStat, standbyFS, dstDir, false, false, conf);
+        FileUtil.copy(srcFS, srcStat, standbyFS, dst, false, false, conf);
         // successfully copied the file
         long endTime = EnvironmentEdgeManager.currentTimeMillis();
         long copyTime = endTime - startTime;
-        LOG.info("Copying file {} size={} took {}ms", src, srcStat.getLen(), copyTime);
+        LOG.info("Copying file src={} dst={} size={} took {}ms", src, dst, srcStat.getLen(), copyTime);
         probeHandler.onProbeSuccess(srcStat, copyTime);
     }
 

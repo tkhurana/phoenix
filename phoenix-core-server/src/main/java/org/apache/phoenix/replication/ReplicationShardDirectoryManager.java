@@ -128,6 +128,20 @@ public class ReplicationShardDirectoryManager {
         return getShardDirectory(replicationRound.getStartTime());
     }
 
+    /**
+     *
+     * @param shardDirectoryPath the shard directory to which file with given timestamp belongs to
+     *                           based on round time
+     * @param fileTimestamp current time
+     * @param serverName name of the server creating the log file
+     * @return
+     */
+    public Path getLogFilePathInShardDirectory(Path shardDirectoryPath,
+                                               long fileTimestamp,
+                                               String serverName) {
+        return new Path(shardDirectoryPath, String.format(ReplicationLogGroup.FILE_NAME_FORMAT,
+                fileTimestamp, serverName));
+    }
 
     /**
      * Returns a ReplicationRound object based on the given round start time,

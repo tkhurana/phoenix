@@ -24,9 +24,11 @@ public class SyncAndForwardMode extends ReplicationMode implements ReplicationPr
         log.init();
         forwarder = new ReplicationLogDiscoveryForwarder(
                 localLogTracker,
+                logGroup.getServerName().getServerName(),
                 log.getFileSystem(),
                 log.getHAGroupLogFilesDir(),
                 this);
+        forwarder.init();
         forwarder.start();
     }
 

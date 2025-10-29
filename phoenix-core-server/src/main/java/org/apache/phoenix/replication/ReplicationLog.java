@@ -22,6 +22,7 @@ import java.io.InterruptedIOException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -235,9 +236,9 @@ public class ReplicationLog {
         if (exception[0] != null) {
             throw exception[0];
         }
-        Path filePath = new Path(shardPath, String.format(ReplicationLogGroup.FILE_NAME_FORMAT,
-                timestamp, logGroup.getServerName()));
-        return filePath;
+
+        return replicationShardDirectoryManager.getLogFilePathInShardDirectory(shardPath,
+                timestamp, logGroup.getServerName().getServerName());
     }
 
     /** Creates and initializes a new LogFileWriter. */

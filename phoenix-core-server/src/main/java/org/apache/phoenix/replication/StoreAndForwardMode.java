@@ -36,16 +36,18 @@ public class StoreAndForwardMode extends ReplicationMode implements ReplicationP
                 logGroup.conf,
                 logGroup.getHaGroupName(),
                 log.getFileSystem(),
-                log.logURI,
+                log.logURI, // local log
                 ReplicationLogTracker.DirectoryType.OUT,
                 MetricsReplicationLogForwarderSourceFactory.
                         getInstanceForTracker(logGroup.getHaGroupName()));
         localLogTracker.init();
         forwarder = new ReplicationLogDiscoveryForwarder(
                 localLogTracker,
+                logGroup.getServerName().getServerName(),
                 standbyFS,
                 standbyLogFilesPath,
                 this);
+        forwarder.init();
         forwarder.start();
     }
 
@@ -67,7 +69,7 @@ public class StoreAndForwardMode extends ReplicationMode implements ReplicationP
     @Override
     public void onProbeSuccess(FileStatus stat, long timeTaken) {
         // calculate throughput in bytes/sec
-        double throughput = stat.getLen()/(timeTaken/1000);
+        //double throughput = stat.getLen()/(timeTaken/1000);
         // TODO Check if the throughput is acceptable
         try {
             logGroup.switchMode(new SyncAndForwardMode(logGroup, forwarder.replicationLogTracker));

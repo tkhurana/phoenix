@@ -203,6 +203,7 @@ public abstract class ReplicationLogDiscovery {
      */
     public void replay() throws IOException {
         Optional<ReplicationRound> optionalNextRound = getNextRoundToProcess();
+        LOG.info("replay round={}", optionalNextRound.isPresent());
         while (optionalNextRound.isPresent()) {
             ReplicationRound replicationRound = optionalNextRound.get();
             try {
@@ -225,6 +226,7 @@ public abstract class ReplicationLogDiscovery {
     protected Optional<ReplicationRound> getNextRoundToProcess() {
         long lastRoundEndTimestamp = getLastRoundProcessed().getEndTime();
         long currentTime = EnvironmentEdgeManager.currentTime();
+        LOG.info("last={} current={}", lastRoundEndTimestamp, currentTime);
         if (currentTime - lastRoundEndTimestamp < roundTimeMills + bufferMillis) {
             // nothing more to process
             return Optional.empty();
@@ -316,7 +318,7 @@ public abstract class ReplicationLogDiscovery {
         try {
             optionalInProgressFilePath = replicationLogTracker.markInProgress(file);
             if (optionalInProgressFilePath.isPresent()) {
-                processFile(file);
+                processFile(optionalInProgressFilePath.get());
                 replicationLogTracker.markCompleted(optionalInProgressFilePath.get());
             }
         } catch (IOException exception) {
