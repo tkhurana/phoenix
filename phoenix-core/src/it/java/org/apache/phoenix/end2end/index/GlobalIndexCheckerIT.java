@@ -64,6 +64,7 @@ import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.TestUtil;
 import org.junit.After;
+import org.junit.Assume;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -1658,6 +1659,50 @@ public class GlobalIndexCheckerIT extends BaseTest {
       assertEquals("abcabc", rs.getString(3));
       assertEquals("abcd", rs.getString(4));
       assertFalse(rs.next());
+    }
+  }
+
+  @Test
+  public void testUnverifiedDeleteRowsPhase2Fail() throws Exception {
+    Assume.assumeTrue(async == false);
+    final String tablename = generateUniqueName();
+    final String indexname = generateUniqueName();
+    String ddl = "CREATE TABLE " + tablename + " (id VARCHAR NOT NULL, k1 INTEGER NOT NULL,"
+      + "k2 INTEGER NOT NULL, k3 INTEGER, v1 VARCHAR "
+      + "CONSTRAINT pk PRIMARY KEY (id, k1, k2)) COLUMN_ENCODED_BYTES = 0";
+    String indexddl = "CREATE INDEX " + indexname + " ON " + tablename + "(k3) include(v1)";
+    try (Connection conn = DriverManager.getConnection(getUrl())) {
+      conn.createStatement().execute(ddl);
+      conn.createStatement().execute(indexddl);
+      String dml = "UPSERT INTO " + tablename + " VALUES(?, ?, ?, ?, ?)";
+      PreparedStatement ps = conn.prepareStatement(dml);
+      int totalRows = 5;
+      for (int i = 0; i < totalRows; ++i) {
+        ps.setString(1, "id_" + i % 3);
+        ps.setInt(2, i % 20);
+        ps.setInt(3, i);
+        ps.setInt(4, i % 10);
+        ps.setString(5, "val");
+        ps.executeUpdate();
+      }
+      conn.commit();
+
+      // update index column and fail phase 2
+      int additionalRows = 2;
+      for (int i = 0; i < additionalRows; ++i) {
+        ps.setString(1, "id_" + i % 3);
+        ps.setInt(2, i % 20);
+        ps.setInt(3, i);
+        ps.setInt(4, 13); // set k3=13
+        ps.executeUpdate();
+      }
+      IndexRegionObserver.setFailDataTableUpdatesForTesting(true);
+      try {
+        commitWithException(conn);
+      } finally {
+        IndexRegionObserver.setFailDataTableUpdatesForTesting(false);
+      }
+      IndexToolIT.verifyIndexTable(tablename, indexname, conn);
     }
   }
 

@@ -1437,15 +1437,14 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
   private void waitForPreviousConcurrentBatch(TableName table, BatchMutateContext context)
     throws Throwable {
     for (BatchMutateContext lastContext : context.lastConcurrentBatchContext.values()) {
-      BatchMutatePhase phase = lastContext.getCurrentPhase();
-      if (phase == BatchMutatePhase.FAILED) {
+      if (lastContext.getCurrentPhase() == BatchMutatePhase.FAILED) {
         context.currentPhase = BatchMutatePhase.FAILED;
         break;
-      } else if (phase == BatchMutatePhase.PRE) {
+      } else if (lastContext.getCurrentPhase() == BatchMutatePhase.PRE) {
         CountDownLatch countDownLatch = lastContext.getCountDownLatch();
         if (countDownLatch == null) {
           // phase changed from PRE to either FAILED or POST
-          if (phase == BatchMutatePhase.FAILED) {
+          if (lastContext.getCurrentPhase() == BatchMutatePhase.FAILED) {
             context.currentPhase = BatchMutatePhase.FAILED;
             break;
           }

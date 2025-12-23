@@ -1040,11 +1040,11 @@ public class IndexToolIT extends BaseTest {
     String tableName = SchemaUtil.getTableNameFromFullName(fullTableName);
     String indexName = SchemaUtil.getTableNameFromFullName(fullIndexName);
     try {
+      LOGGER.info("Dumping index table {} before running index tool", fullIndexName);
+      TestUtil.dumpTable(conn, TableName.valueOf(fullIndexName));
       // This checks the state of every raw index row without rebuilding any row
       IndexTool indexTool = IndexToolIT.runIndexTool(false, schemaName, tableName, indexName, null,
         0, IndexTool.IndexVerifyType.ONLY);
-      TestUtil.dumpTable(conn,
-        TableName.valueOf(IndexVerificationOutputRepository.OUTPUT_TABLE_NAME));
       Counters counters = indexTool.getJob().getCounters();
       LOGGER.info(counters.toString());
       assertEquals(0, counters.findCounter(REBUILT_INDEX_ROW_COUNT).getValue());
@@ -1121,6 +1121,8 @@ public class IndexToolIT extends BaseTest {
     } catch (AssertionError e) {
       TestUtil.dumpTable(conn, TableName.valueOf(fullTableName));
       TestUtil.dumpTable(conn, TableName.valueOf(fullIndexName));
+      TestUtil.dumpTable(conn,
+        TableName.valueOf(IndexVerificationOutputRepository.OUTPUT_TABLE_NAME));
       throw e;
     }
   }
