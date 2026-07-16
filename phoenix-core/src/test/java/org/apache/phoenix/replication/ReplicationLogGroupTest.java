@@ -24,6 +24,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -34,6 +35,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -55,6 +57,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.phoenix.jdbc.ClusterType;
+import org.apache.phoenix.jdbc.HAGroupStateListener;
+import org.apache.phoenix.jdbc.HAGroupStoreManager;
 import org.apache.phoenix.jdbc.HAGroupStoreRecord;
 import org.apache.phoenix.jdbc.HAGroupStoreRecord.HAGroupState;
 import org.apache.phoenix.jdbc.HighAvailabilityPolicy;
@@ -67,6 +72,7 @@ import org.apache.phoenix.replication.log.LogFileWriterContext;
 import org.apache.phoenix.replication.metrics.ReplicationLogMetricValues;
 import org.junit.Assume;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
@@ -2385,5 +2391,135 @@ public class ReplicationLogGroupTest extends ReplicationLogBaseTest {
       values.getSyncTimeMax() > 0);
     assertTrue("fsSyncTime should be > 0, got " + values.getFsSyncTimeMax(),
       values.getFsSyncTimeMax() > 0);
+  }
+
+  /**
+   * A replication log group is a writer and must exist only where the local cluster is active.
+   * init() must fail fast on a non-active role (here STANDBY) before creating any writer resource —
+   * no local shard manager, no forwarder, no demotion subscription.
+   */
+  @Test
+  public void testInitFailsFastOnStandby() throws Exception {
+    // Use a fresh HA group + its own mock manager so the never() verifications observe only this
+    // init() attempt, independent of the active logGroup created by setUpBase().
+    final String standbyGroup = haGroupName + "-standby";
+    HAGroupStoreManager standbyManager = Mockito.mock(HAGroupStoreManager.class);
+    HAGroupStoreRecord standbyRecord = new HAGroupStoreRecord(null, standbyGroup,
+      HAGroupState.STANDBY, 0, HighAvailabilityPolicy.FAILOVER.toString(), "peerZKUrl",
+      "clusterUrl", "peerClusterUrl", localUri.toString(), peerUri.toString(), 0L);
+    doReturn(Optional.of(standbyRecord)).when(standbyManager)
+      .getEffectiveHAGroupStoreRecord(anyString());
+
+    ReplicationLogGroup group = spy(
+      new TestableLogGroup(conf, serverName, standbyGroup, standbyManager, useAlignedRotation()));
+    try {
+      group.init();
+      fail("init() should fail fast on a non-active (STANDBY) role");
+    } catch (IOException e) {
+      assertTrue("Message should explain the role is not active: " + e.getMessage(),
+        e.getMessage().contains("is not active"));
+    }
+
+    // No writer resources should have been created.
+    verify(group, never()).createLocalShardManager();
+    assertNull("Forwarder must not be created on a standby", group.getLogForwarder());
+    // The demotion subscription is registered only after the role gate passes.
+    verify(standbyManager, never()).subscribeToTargetState(eq(standbyGroup),
+      eq(HAGroupState.STANDBY), eq(ClusterType.LOCAL), any(HAGroupStateListener.class));
+  }
+
+  /**
+   * A group created while active must not outlive the active role. When the LOCAL cluster is
+   * demoted to STANDBY, the subscribed listener closes the writer group (on a background thread,
+   * per the non-blocking listener contract).
+   */
+  @Test
+  public void testDemotionToStandbyClosesGroup() throws Exception {
+    // Capture the LOCAL STANDBY listener that init() registered for the default (active) logGroup.
+    ArgumentCaptor<HAGroupStateListener> captor =
+      ArgumentCaptor.forClass(HAGroupStateListener.class);
+    verify(haGroupStoreManager).subscribeToTargetState(eq(haGroupName), eq(HAGroupState.STANDBY),
+      eq(ClusterType.LOCAL), captor.capture());
+    HAGroupStateListener demotionListener = captor.getValue();
+    assertNotNull("A LOCAL STANDBY listener should have been registered", demotionListener);
+    assertFalse("Group should be open before demotion", logGroup.isClosed());
+
+    // Fire the demotion event. close() is handed to a daemon thread, so poll for completion.
+    demotionListener.onStateChange(haGroupName, HAGroupState.ACTIVE_IN_SYNC_TO_STANDBY,
+      HAGroupState.STANDBY, 0L, ClusterType.LOCAL, 0L);
+
+    long deadline = System.currentTimeMillis() + 5000;
+    while (!logGroup.isClosed() && System.currentTimeMillis() < deadline) {
+      sleep(20);
+    }
+    assertTrue("Group should be closed after demotion to STANDBY", logGroup.isClosed());
+  }
+
+  /**
+   * A peer-blind demotion surfaces as LOCAL DEGRADED_STANDBY (the bare STANDBY notification is
+   * suppressed while the peer is not visible). The same listener must tear the writer down so it
+   * does not outlive the active role through the degraded window.
+   */
+  @Test
+  public void testDemotionToDegradedStandbyClosesGroup() throws Exception {
+    ArgumentCaptor<HAGroupStateListener> captor =
+      ArgumentCaptor.forClass(HAGroupStateListener.class);
+    verify(haGroupStoreManager).subscribeToTargetState(eq(haGroupName),
+      eq(HAGroupState.DEGRADED_STANDBY), eq(ClusterType.LOCAL), captor.capture());
+    HAGroupStateListener demotionListener = captor.getValue();
+    assertNotNull("A LOCAL DEGRADED_STANDBY listener should have been registered",
+      demotionListener);
+    assertFalse("Group should be open before demotion", logGroup.isClosed());
+
+    demotionListener.onStateChange(haGroupName, HAGroupState.ACTIVE_IN_SYNC_TO_STANDBY,
+      HAGroupState.DEGRADED_STANDBY, 0L, ClusterType.LOCAL, 0L);
+
+    long deadline = System.currentTimeMillis() + 5000;
+    while (!logGroup.isClosed() && System.currentTimeMillis() < deadline) {
+      sleep(20);
+    }
+    assertTrue("Group should be closed after demotion to DEGRADED_STANDBY", logGroup.isClosed());
+  }
+
+  /**
+   * A non-LOCAL (PEER) STANDBY event, or a LOCAL event to a non-STANDBY state, must not tear down
+   * the writer.
+   */
+  @Test
+  public void testDemotionIgnoresPeerAndNonStandby() throws Exception {
+    ArgumentCaptor<HAGroupStateListener> captor =
+      ArgumentCaptor.forClass(HAGroupStateListener.class);
+    verify(haGroupStoreManager).subscribeToTargetState(eq(haGroupName), eq(HAGroupState.STANDBY),
+      eq(ClusterType.LOCAL), captor.capture());
+    HAGroupStateListener demotionListener = captor.getValue();
+
+    // PEER STANDBY — not our cluster demoting.
+    demotionListener.onStateChange(haGroupName, HAGroupState.ACTIVE_IN_SYNC, HAGroupState.STANDBY,
+      0L, ClusterType.PEER, 0L);
+    // LOCAL but not STANDBY.
+    demotionListener.onStateChange(haGroupName, HAGroupState.ACTIVE_IN_SYNC,
+      HAGroupState.ACTIVE_NOT_IN_SYNC, 0L, ClusterType.LOCAL, 0L);
+
+    sleep(100);
+    assertFalse("Group must stay open for PEER/non-STANDBY events", logGroup.isClosed());
+  }
+
+  /**
+   * close() must unsubscribe every LOCAL listener registered during init() — the group's own
+   * demotion listener and the forwarder's two mode listeners — so a group closed on demotion does
+   * not leak listeners holding a reference to the dead group.
+   */
+  @Test
+  public void testCloseUnsubscribesListeners() throws Exception {
+    logGroup.close();
+
+    verify(haGroupStoreManager).unsubscribeFromTargetState(eq(haGroupName),
+      eq(HAGroupState.STANDBY), eq(ClusterType.LOCAL), any(HAGroupStateListener.class));
+    verify(haGroupStoreManager).unsubscribeFromTargetState(eq(haGroupName),
+      eq(HAGroupState.DEGRADED_STANDBY), eq(ClusterType.LOCAL), any(HAGroupStateListener.class));
+    verify(haGroupStoreManager).unsubscribeFromTargetState(eq(haGroupName),
+      eq(HAGroupState.ACTIVE_NOT_IN_SYNC), eq(ClusterType.LOCAL), any(HAGroupStateListener.class));
+    verify(haGroupStoreManager).unsubscribeFromTargetState(eq(haGroupName),
+      eq(HAGroupState.ACTIVE_IN_SYNC), eq(ClusterType.LOCAL), any(HAGroupStateListener.class));
   }
 }

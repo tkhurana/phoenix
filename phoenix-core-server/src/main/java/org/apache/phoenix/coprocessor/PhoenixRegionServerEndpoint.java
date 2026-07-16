@@ -324,6 +324,11 @@ public class PhoenixRegionServerEndpoint extends
                   LOGGER.warn("Failed to eagerly initialize ReplicationLogGroup for HA group: {}."
                     + " Will be lazily initialized on first mutation.", haGroup, e);
                 }
+              } else {
+                LOGGER.info(
+                  "Skipping eager ReplicationLogGroup init for HA group: {} on server {};"
+                    + " the writer will be created lazily if this cluster becomes active.",
+                  haGroup, serverName);
               }
               iterator.remove();
               LOGGER.info("Prewarmed HAGroupStoreClient: {} ({} remaining)", haGroup,

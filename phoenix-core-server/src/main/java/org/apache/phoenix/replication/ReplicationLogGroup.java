@@ -65,6 +65,8 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.phoenix.execute.MutationState;
+import org.apache.phoenix.jdbc.ClusterType;
+import org.apache.phoenix.jdbc.HAGroupStateListener;
 import org.apache.phoenix.jdbc.HAGroupStoreManager;
 import org.apache.phoenix.jdbc.HAGroupStoreRecord;
 import org.apache.phoenix.jdbc.HAGroupStoreRecord.HAGroupState;
@@ -235,6 +237,9 @@ public class ReplicationLogGroup {
   protected final AtomicBoolean closed = new AtomicBoolean(false);
   protected final Abortable abortable;
   protected long shutdownTimeoutMs;
+  // LOCAL STANDBY listener that closes this (writer) group when the local cluster is demoted.
+  // Retained so it can be unsubscribed on close().
+  private HAGroupStateListener demotionListener;
 
   /**
    * The replication mode determines how mutations are handled. Mode transitions occur automatically
@@ -507,6 +512,18 @@ public class ReplicationLogGroup {
       throw new IOException(message);
     }
     HAGroupStoreRecord record = haRecord.get();
+    // Fail fast on a non-active cluster before creating any writer resources. A replication log
+    // group is a WRITER; it must exist only where this cluster is the active side. Only mutations
+    // carrying HA_GROUP_NAME reach get()/init() (the standby replay-apply path does not annotate
+    // that attribute), so on a standby this is a stray/split-brain sync-path write and must fail —
+    // rather than starting a writer whose status-update task fails forever and whose forwarder
+    // self-promotes to SYNC_AND_FORWARD. computeIfAbsent does not cache when the factory throws, so
+    // the first write after this cluster is promoted re-runs init() against the now-active role.
+    if (!record.getClusterRole().isActive()) {
+      throw new IOException(String
+        .format("HAGroup %s cannot start a replication log writer: local role %s is not active"
+          + " (state %s)", this, record.getClusterRole(), record.getHAGroupState()));
+    }
     this.haGroupStoreRecord = record;
     this.localShardManager = createLocalShardManager();
     this.peerInitTimeoutMs = conf.getLong(REPLICATION_LOG_PEER_INIT_TIMEOUT_MS_KEY,
@@ -521,7 +538,41 @@ public class ReplicationLogGroup {
     this.syncTimeoutMs = conf.getLong(REPLICATION_LOG_SYNC_TIMEOUT_KEY, calculateSyncTimeout());
     // Initialize the disruptor so that we start processing events
     initializeDisruptor();
+    // Close this writer group when the local cluster is demoted to STANDBY. init() itself fails
+    // fast
+    // on a non-active role, so this covers the other edge: a group created while active must not
+    // outlive the active role.
+    subscribeToDemotion();
     LOG.info("HAGroup {} started with mode={}", this, mode);
+  }
+
+  /**
+   * Subscribe a LOCAL demotion listener that tears this group down when the local cluster leaves
+   * the active role. Fires on both {@code STANDBY} and {@code DEGRADED_STANDBY}: when the peer is
+   * not visible a demotion to STANDBY surfaces as DEGRADED_STANDBY (peer-blind), so listening only
+   * for STANDBY would leave the writer alive through the degraded window. Both map to the STANDBY
+   * role. The listener contract forbids blocking on the cache-event thread, so the (blocking)
+   * {@link #close()} is handed off to a short-lived daemon thread. Idempotent: {@code close()} is
+   * CAS-guarded, and closing removes this instance from the cache so a later write re-runs
+   * {@link #init()} against the current role.
+   */
+  protected void subscribeToDemotion() throws IOException {
+    this.demotionListener =
+      (groupName, fromState, toState, modifiedTime, clusterType, lastSyncStateTimeInMs) -> {
+        if (
+          clusterType == ClusterType.LOCAL && (HAGroupState.STANDBY.equals(toState)
+            || HAGroupState.DEGRADED_STANDBY.equals(toState))
+        ) {
+          LOG.info("HAGroup {} demoted to {}; closing replication log writer", this, toState);
+          Thread t = new Thread(this::close, "ReplicationLogGroup-demote-" + getHAGroupName());
+          t.setDaemon(true);
+          t.start();
+        }
+      };
+    haGroupStoreManager.subscribeToTargetState(haGroupName, HAGroupState.STANDBY, ClusterType.LOCAL,
+      demotionListener);
+    haGroupStoreManager.subscribeToTargetState(haGroupName, HAGroupState.DEGRADED_STANDBY,
+      ClusterType.LOCAL, demotionListener);
   }
 
   /**
@@ -538,7 +589,9 @@ public class ReplicationLogGroup {
   }
 
   /**
-   * Initialize the replication mode based on the HAGroupStore state
+   * Initialize the replication mode based on the HAGroupStore state. Only reached on an active
+   * cluster ({@link #init()} fails fast on a non-active role), so the mapping is between the two
+   * active writer modes.
    */
   protected void initializeReplicationMode(HAGroupStoreRecord record) throws IOException {
     HAGroupState haGroupState = record.getHAGroupState();
@@ -757,6 +810,12 @@ public class ReplicationLogGroup {
     }
     LOG.info("Closing HAGroup {}", this);
     INSTANCES.remove(instanceKey(serverName, haGroupName));
+    if (demotionListener != null) {
+      haGroupStoreManager.unsubscribeFromTargetState(haGroupName, HAGroupState.STANDBY,
+        ClusterType.LOCAL, demotionListener);
+      haGroupStoreManager.unsubscribeFromTargetState(haGroupName, HAGroupState.DEGRADED_STANDBY,
+        ClusterType.LOCAL, demotionListener);
+    }
     try {
       disruptor.shutdown(shutdownTimeoutMs, TimeUnit.MILLISECONDS);
     } catch (com.lmax.disruptor.TimeoutException e) {

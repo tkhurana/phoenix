@@ -67,6 +67,9 @@ public class ReplicationLogDiscoveryForwarder extends ReplicationLogDiscovery {
   private final double copyThroughputThresholdBytesPerMs;
   // the timestamp (in future) at which we will attempt to set the HAGroup state to SYNC
   private long syncUpdateTS;
+  // LOCAL state listeners registered in init(); retained so they can be unsubscribed on close().
+  private HAGroupStateListener activeNotInSyncListener;
+  private HAGroupStateListener activeInSyncListener;
 
   /**
    * Create a tracker for the replication logs in the fallback cluster.
@@ -101,7 +104,7 @@ public class ReplicationLogDiscoveryForwarder extends ReplicationLogDiscovery {
     // Set up a listener to the ACTIVE_NOT_IN_SYNC state. This is needed because whenever any
     // RS switches to STORE_AND_FORWARD mode, other RS's in the cluster must move out of SYNC
     // mode.
-    HAGroupStateListener activeNotInSync =
+    activeNotInSyncListener =
       (groupName, fromState, toState, modifiedTime, clusterType, lastSyncStateTimeInMs) -> {
         if (
           clusterType == ClusterType.LOCAL
@@ -116,7 +119,7 @@ public class ReplicationLogDiscoveryForwarder extends ReplicationLogDiscovery {
     // Set up a listener to the ACTIVE_IN_SYNC state. This is needed because when the RS
     // switches back to SYNC mode, the other RS's in the cluster must move out of
     // SYNC_AND_FORWARD mode to SYNC mode.
-    HAGroupStateListener activeInSync =
+    activeInSyncListener =
       (groupName, fromState, toState, modifiedTime, clusterType, lastSyncStateTimeInMs) -> {
         if (
           clusterType == ClusterType.LOCAL
@@ -130,9 +133,28 @@ public class ReplicationLogDiscoveryForwarder extends ReplicationLogDiscovery {
 
     HAGroupStoreManager haGroupStoreManager = logGroup.getHAGroupStoreManager();
     haGroupStoreManager.subscribeToTargetState(logGroup.getHAGroupName(),
-      HAGroupStoreRecord.HAGroupState.ACTIVE_NOT_IN_SYNC, ClusterType.LOCAL, activeNotInSync);
+      HAGroupStoreRecord.HAGroupState.ACTIVE_NOT_IN_SYNC, ClusterType.LOCAL,
+      activeNotInSyncListener);
     haGroupStoreManager.subscribeToTargetState(logGroup.getHAGroupName(),
-      HAGroupStoreRecord.HAGroupState.ACTIVE_IN_SYNC, ClusterType.LOCAL, activeInSync);
+      HAGroupStoreRecord.HAGroupState.ACTIVE_IN_SYNC, ClusterType.LOCAL, activeInSyncListener);
+  }
+
+  @Override
+  public void close() {
+    // Unsubscribe the LOCAL listeners registered in init() before tearing down. A group can be
+    // closed mid-life on demotion, so leaving these registered would leak a reference to a closed
+    // logGroup and, on a later re-promotion, fire mode changes against a closed group.
+    HAGroupStoreManager haGroupStoreManager = logGroup.getHAGroupStoreManager();
+    if (activeNotInSyncListener != null) {
+      haGroupStoreManager.unsubscribeFromTargetState(logGroup.getHAGroupName(),
+        HAGroupStoreRecord.HAGroupState.ACTIVE_NOT_IN_SYNC, ClusterType.LOCAL,
+        activeNotInSyncListener);
+    }
+    if (activeInSyncListener != null) {
+      haGroupStoreManager.unsubscribeFromTargetState(logGroup.getHAGroupName(),
+        HAGroupStoreRecord.HAGroupState.ACTIVE_IN_SYNC, ClusterType.LOCAL, activeInSyncListener);
+    }
+    super.close();
   }
 
   @Override

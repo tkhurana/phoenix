@@ -26,7 +26,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -55,6 +57,7 @@ import org.apache.hadoop.hbase.util.JVMClusterUtil;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
 import org.apache.phoenix.hbase.index.IndexRegionObserver;
+import org.apache.phoenix.jdbc.ClusterRoleRecord;
 import org.apache.phoenix.jdbc.FailoverPhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixResultSet;
 import org.apache.phoenix.query.PhoenixTestBuilder;
@@ -1210,6 +1213,58 @@ public class ReplicationLogGroupIT extends ReplicationLogGroupBaseIT {
       doneSignal.await(120, TimeUnit.SECONDS));
     if (firstError.get() != null) {
       throw new AssertionError("A concurrent upsert thread failed", firstError.get());
+    }
+  }
+
+  /**
+   * A replication log group is a writer and must not outlive the active role. This drives a real
+   * LOCAL demotion (cluster 1 ACTIVE -> STANDBY, cluster 2 STANDBY -> ACTIVE) through the actual
+   * HAGroupStoreClient/ZooKeeper path -- the delivery that the unit tests mock out -- and asserts
+   * the writer created for the active role is torn down. A subsequent get() must fail fast against
+   * the now-STANDBY role rather than re-create a writer.
+   */
+  @Test
+  public void testWriterClosesOnDemotionToStandby() throws Exception {
+    final String tableName = "T_" + generateUniqueName();
+    String createTableDdl = String.format(
+      "create table if not exists %s (id integer not null primary key, val varchar)", tableName);
+
+    // Write on the active so the lazily-created writer is real and running.
+    try (FailoverPhoenixConnection conn = (FailoverPhoenixConnection) DriverManager
+      .getConnection(CLUSTERS.getJdbcHAUrl(), clientProps)) {
+      conn.createStatement().execute(createTableDdl);
+      conn.commit();
+      PreparedStatement stmt = conn.prepareStatement("upsert into " + tableName + " VALUES(?, ?)");
+      for (int i = 0; i < 10; i++) {
+        stmt.setInt(1, i);
+        stmt.setString(2, "v" + i);
+        stmt.executeUpdate();
+      }
+      conn.commit();
+    }
+    assertFalse("Writer should be open while the local cluster is active", logGroup.isClosed());
+
+    // Demote cluster 1 to STANDBY (cluster 2 becomes ACTIVE). The RS's HAGroupStoreClient observes
+    // the ZK role change and fires the LOCAL demotion listener registered by the log group.
+    ServerName sn =
+      CLUSTERS.getHBaseCluster1().getHBaseCluster().getRegionServer(0).getServerName();
+    CLUSTERS.transitClusterRole(haGroup, ClusterRoleRecord.ClusterRole.STANDBY,
+      ClusterRoleRecord.ClusterRole.ACTIVE);
+
+    // close() is handed to a daemon thread by the listener, so poll for completion.
+    long deadline = System.currentTimeMillis() + 30000;
+    while (!logGroup.isClosed() && System.currentTimeMillis() < deadline) {
+      Threads.sleep(200);
+    }
+    assertTrue("Writer must be closed after demotion to STANDBY", logGroup.isClosed());
+
+    // The role gate must now reject re-creating a writer on the demoted (STANDBY) cluster.
+    try {
+      ReplicationLogGroup.get(conf1, sn, haGroupName);
+      fail("get() should fail fast on a STANDBY cluster");
+    } catch (IOException e) {
+      assertTrue("Message should explain the role is not active: " + e.getMessage(),
+        e.getMessage().contains("is not active"));
     }
   }
 
