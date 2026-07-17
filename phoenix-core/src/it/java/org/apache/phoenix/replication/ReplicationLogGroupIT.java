@@ -1268,6 +1268,85 @@ public class ReplicationLogGroupIT extends ReplicationLogGroupBaseIT {
     }
   }
 
+  /**
+   * The graceful-failover deadlock fix: while the local cluster sits in the in-sync cutover gate
+   * (ACTIVE_IN_SYNC_TO_STANDBY), time-based log rotation must be suspended so no new .plog files
+   * are dropped into the peer's shard directory — otherwise the standby's failover-completion check
+   * (getNewFiles(...).isEmpty()) never holds and both clusters spin forever. This drives the real
+   * ZK role change through the RS's HAGroupStoreClient (the delivery the unit tests mock) and
+   * asserts: (1) entering the cutover gate suspends rotation — the peer .plog count is unchanged
+   * across several rounds while the writer stays open; (2) aborting back to ACTIVE_IN_SYNC resumes
+   * rotation — new files appear again.
+   */
+  @Test
+  public void testCutoverSuspendsAndResumesRotation() throws Exception {
+    final String tableName = "T_" + generateUniqueName();
+    String createTableDdl = String.format(
+      "create table if not exists %s (id integer not null primary key, val varchar)", tableName);
+
+    // Write on the active so a real SYNC-mode writer is open and dropping files into the peer dir.
+    try (FailoverPhoenixConnection conn = (FailoverPhoenixConnection) DriverManager
+      .getConnection(CLUSTERS.getJdbcHAUrl(), clientProps)) {
+      conn.createStatement().execute(createTableDdl);
+      conn.commit();
+      PreparedStatement stmt = conn.prepareStatement("upsert into " + tableName + " VALUES(?, ?)");
+      for (int i = 0; i < 10; i++) {
+        stmt.setInt(1, i);
+        stmt.setString(2, "v" + i);
+        stmt.executeUpdate();
+      }
+      conn.commit();
+    }
+    assertFalse("Writer should be open while the local cluster is active", logGroup.isClosed());
+
+    Path peerDir = logGroup.getOrCreatePeerShardManager().getRootDirectoryPath();
+    FileSystem peerFs = peerDir.getFileSystem(conf2);
+    long roundMs = TimeUnit.SECONDS.toMillis(5); // PHOENIX_REPLICATION_ROUND_DURATION_SECONDS_KEY
+
+    // Enter the in-sync cutover gate (cluster 1 ACTIVE_TO_STANDBY -> ACTIVE_IN_SYNC_TO_STANDBY).
+    CLUSTERS.transitClusterRole(haGroup, ClusterRoleRecord.ClusterRole.ACTIVE_TO_STANDBY,
+      ClusterRoleRecord.ClusterRole.STANDBY_TO_ACTIVE);
+
+    // The RS's HAGroupStoreClient observes the ZK role change and fires the LOCAL listener.
+    long deadline = System.currentTimeMillis() + 30000;
+    while (!logGroup.isFailoverPending() && System.currentTimeMillis() < deadline) {
+      Threads.sleep(200);
+    }
+    assertTrue("Cutover must set failover-pending", logGroup.isFailoverPending());
+    assertFalse("Group must stay open during cutover", logGroup.isClosed());
+
+    // Snapshot after suspension is active, then wait several rounds; the count must not grow. The
+    // base class disables the replay reader on both clusters (PHOENIX_REPLICATION_REPLAY_ENABLED =
+    // false); replay only runs via the explicit replayAndVerifyAcrossClusters helper, which this
+    // test never calls. So nothing consumes or deletes files from the peer dir — the count only
+    // ever grows via the active's rotation, making both assertions below deterministic.
+    int filesAtCutover = findLogFiles(peerDir, peerFs).size();
+    Threads.sleep(3 * roundMs);
+    assertEquals("Rotation must be suspended during cutover: no new peer .plog files",
+      filesAtCutover, findLogFiles(peerDir, peerFs).size());
+    assertFalse("Writer must stay open through the suspended window", logGroup.isClosed());
+
+    // Abort the failover back to ACTIVE_IN_SYNC; rotation must resume on the same live group.
+    CLUSTERS.transitClusterRole(haGroup, ClusterRoleRecord.ClusterRole.ACTIVE,
+      ClusterRoleRecord.ClusterRole.STANDBY);
+    deadline = System.currentTimeMillis() + 30000;
+    while (logGroup.isFailoverPending() && System.currentTimeMillis() < deadline) {
+      Threads.sleep(200);
+    }
+    assertFalse("Cutover abort must clear failover-pending", logGroup.isFailoverPending());
+
+    // With rotation resumed, subsequent rounds mint new files again.
+    deadline = System.currentTimeMillis() + 3 * roundMs + 10000;
+    while (
+      findLogFiles(peerDir, peerFs).size() <= filesAtCutover
+        && System.currentTimeMillis() < deadline
+    ) {
+      Threads.sleep(200);
+    }
+    assertTrue("Rotation must resume after the abort clears failover-pending",
+      findLogFiles(peerDir, peerFs).size() > filesAtCutover);
+  }
+
   private PhoenixTestBuilder.SchemaBuilder createViewHierarchy() throws Exception {
     // Define the test schema.
     // 1. Table with columns => (ORG_ID, KP, COL1, COL2, COL3), PK => (ORG_ID, KP)

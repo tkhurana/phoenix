@@ -19,12 +19,14 @@ package org.apache.phoenix.replication;
 
 import static java.lang.Thread.sleep;
 import static org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode.STORE_AND_FORWARD;
+import static org.apache.phoenix.replication.ReplicationLogGroup.ReplicationMode.SYNC;
 import static org.apache.phoenix.replication.ReplicationShardDirectoryManager.PHOENIX_REPLICATION_ROUND_DURATION_SECONDS_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -2429,6 +2431,153 @@ public class ReplicationLogGroupTest extends ReplicationLogBaseTest {
   }
 
   /**
+   * ACTIVE_IN_SYNC_TO_STANDBY is the in-sync cutover gate (role ACTIVE_TO_STANDBY, mutations
+   * blocked). init() reaches it not from the live write path (blocked) but from preWALRestore
+   * recovery on an RS restart / region reassignment during cutover. It must NOT fail fast: throwing
+   * would abort WAL replay and silently fail to re-ship already-committed edits to the peer.
+   * Instead the writer starts in SYNC with failoverPending already set, so recovery ships its edits
+   * while rotation stays suspended (no new files that would re-arm the standby deadlock).
+   */
+  @Test
+  public void testInitInCutoverStartsSyncWithFailoverPending() throws Exception {
+    final String cutoverGroup = haGroupName + "-cutover";
+    HAGroupStoreManager cutoverManager = Mockito.mock(HAGroupStoreManager.class);
+    HAGroupStoreRecord cutoverRecord = new HAGroupStoreRecord(null, cutoverGroup,
+      HAGroupState.ACTIVE_IN_SYNC_TO_STANDBY, 0, HighAvailabilityPolicy.FAILOVER.toString(),
+      "peerZKUrl", "clusterUrl", "peerClusterUrl", localUri.toString(), peerUri.toString(), 0L);
+    doReturn(Optional.of(cutoverRecord)).when(cutoverManager)
+      .getEffectiveHAGroupStoreRecord(anyString());
+
+    ReplicationLogGroup group =
+      new TestableLogGroup(conf, serverName, cutoverGroup, cutoverManager, useAlignedRotation());
+    group.init();
+    try {
+      assertEquals("Cutover init must start in SYNC", SYNC, group.getMode());
+      assertTrue("Cutover init must seed failover-pending so rotation stays suspended",
+        group.isFailoverPending());
+    } finally {
+      group.close();
+    }
+  }
+
+  /**
+   * On the live demotion path (an existing writer created while ACTIVE_IN_SYNC), entering the
+   * in-sync cutover gate (ACTIVE_IN_SYNC_TO_STANDBY) must set failoverPending — which suspends
+   * rotation — but must NOT close the group: a straggler write that committed locally before the
+   * mutation block still needs the open writer to reach the peer.
+   */
+  @Test
+  public void testCutoverSetsFailoverPending() throws Exception {
+    ArgumentCaptor<HAGroupStateListener> captor =
+      ArgumentCaptor.forClass(HAGroupStateListener.class);
+    verify(haGroupStoreManager).subscribeToTargetState(eq(haGroupName),
+      eq(HAGroupState.ACTIVE_IN_SYNC_TO_STANDBY), eq(ClusterType.LOCAL), captor.capture());
+    HAGroupStateListener demotionListener = captor.getValue();
+    assertNotNull("A LOCAL ACTIVE_IN_SYNC_TO_STANDBY listener should be registered",
+      demotionListener);
+    assertFalse("Group should not be failover-pending before cutover",
+      logGroup.isFailoverPending());
+
+    demotionListener.onStateChange(haGroupName, HAGroupState.ACTIVE_IN_SYNC,
+      HAGroupState.ACTIVE_IN_SYNC_TO_STANDBY, 0L, ClusterType.LOCAL, 0L);
+
+    assertTrue("Cutover must set failover-pending", logGroup.isFailoverPending());
+    // Rotation is suspended: forceRotation() stages no new writer, and the current writer stays
+    // open.
+    ReplicationLog activeLog = logGroup.getActiveLog();
+    LogFileWriter writerBefore = activeLog.getWriter();
+    activeLog.forceRotation();
+    assertEquals("Rotation must be suppressed while failover-pending", writerBefore,
+      activeLog.getWriter());
+    assertFalse("Group must stay open during cutover", logGroup.isClosed());
+  }
+
+  /**
+   * With failoverPending set, rotation is suspended: even an explicit forceRotation() must be a
+   * no-op, leaving the same writer open so an in-flight append + sync still lands on it (the
+   * straggler mutation reaches the peer instead of hitting IOException("Closed") or a fresh file).
+   */
+  @Test
+  public void testCutoverKeepsWriterOpenForInflight() throws Exception {
+    final String tableName = "TBLCUT";
+    final Mutation put = LogFileTestUtil.newPut("row", 1, 1);
+
+    ReplicationLog activeLog = logGroup.getActiveLog();
+    LogFileWriter writerBefore = activeLog.getWriter();
+    logGroup.setFailoverPending(true);
+
+    // Rotation is suspended: forceRotation() stages no new writer.
+    activeLog.forceRotation();
+    assertSame("Cutover must keep the same writer open, not rotate to a new one", writerBefore,
+      activeLog.getWriter());
+
+    // The in-flight write still lands on that open writer.
+    logGroup.append(tableName, 1L, put);
+    logGroup.sync();
+
+    assertFalse("Group must stay open during cutover", logGroup.isClosed());
+    assertSame("Append + sync must not have rotated the writer", writerBefore,
+      activeLog.getWriter());
+    verify(writerBefore, times(1)).sync();
+  }
+
+  /**
+   * A cutover abort (ACTIVE_IN_SYNC_TO_STANDBY → ABORT_TO_ACTIVE_IN_SYNC → ACTIVE_IN_SYNC) must
+   * clear failoverPending on the same live group, resuming rotation.
+   */
+  @Test
+  public void testAbortClearsFailoverPending() throws Exception {
+    ArgumentCaptor<HAGroupStateListener> captor =
+      ArgumentCaptor.forClass(HAGroupStateListener.class);
+    verify(haGroupStoreManager).subscribeToTargetState(eq(haGroupName),
+      eq(HAGroupState.ACTIVE_IN_SYNC), eq(ClusterType.LOCAL), captor.capture());
+    HAGroupStateListener abortResumeListener = captor.getValue();
+
+    logGroup.setFailoverPending(true);
+    abortResumeListener.onStateChange(haGroupName, HAGroupState.ABORT_TO_ACTIVE_IN_SYNC,
+      HAGroupState.ACTIVE_IN_SYNC, 0L, ClusterType.LOCAL, 0L);
+
+    assertFalse("Cutover abort must clear failover-pending", logGroup.isFailoverPending());
+    // Rotation resumes: forceRotation() now stages a new writer.
+    ReplicationLog activeLog = logGroup.getActiveLog();
+    LogFileWriter writerBefore = activeLog.getWriter();
+    activeLog.forceRotation();
+    logGroup.append("TBLRES", 1L, LogFileTestUtil.newPut("row", 1, 1));
+    logGroup.sync();
+    assertNotEquals("Rotation must resume after abort clears the flag", writerBefore,
+      activeLog.getWriter());
+  }
+
+  /**
+   * A SYNC write that fails while failoverPending must NOT transition to STORE_AND_FORWARD (that
+   * targets ACTIVE_NOT_IN_SYNC, an illegal transition from the cutover gate). Instead it
+   * fail-stops: the sync throws and the group aborts, never calling
+   * setHAGroupStatusToStoreAndForward.
+   */
+  @Test
+  public void testCutoverSyncFailureAborts() throws Exception {
+    final String tableName = "TBLCUTFAIL";
+    final Mutation put = LogFileTestUtil.newPut("row", 1, 1);
+
+    ReplicationLog activeLog = logGroup.getActiveLog();
+    LogFileWriter initialWriter = activeLog.getWriter();
+    doThrow(new IOException("Simulated sync failure")).when(initialWriter).sync();
+
+    logGroup.setFailoverPending(true);
+    logGroup.append(tableName, 1L, put);
+    try {
+      logGroup.sync();
+      fail("Sync failure during cutover should abort, not fall back to STORE_AND_FORWARD");
+    } catch (IOException expected) {
+      // expected — the fail-stop path
+    }
+
+    verify(haGroupStoreManager, never()).setHAGroupStatusToStoreAndForward(haGroupName);
+    assertNotEquals("Must not transition to STORE_AND_FORWARD during cutover", STORE_AND_FORWARD,
+      logGroup.getMode());
+  }
+
+  /**
    * A group created while active must not outlive the active role. When the LOCAL cluster is
    * demoted to STANDBY, the subscribed listener closes the writer group (on a background thread,
    * per the non-blocking listener contract).
@@ -2482,37 +2631,18 @@ public class ReplicationLogGroupTest extends ReplicationLogBaseTest {
   }
 
   /**
-   * A non-LOCAL (PEER) STANDBY event, or a LOCAL event to a non-STANDBY state, must not tear down
-   * the writer.
-   */
-  @Test
-  public void testDemotionIgnoresPeerAndNonStandby() throws Exception {
-    ArgumentCaptor<HAGroupStateListener> captor =
-      ArgumentCaptor.forClass(HAGroupStateListener.class);
-    verify(haGroupStoreManager).subscribeToTargetState(eq(haGroupName), eq(HAGroupState.STANDBY),
-      eq(ClusterType.LOCAL), captor.capture());
-    HAGroupStateListener demotionListener = captor.getValue();
-
-    // PEER STANDBY — not our cluster demoting.
-    demotionListener.onStateChange(haGroupName, HAGroupState.ACTIVE_IN_SYNC, HAGroupState.STANDBY,
-      0L, ClusterType.PEER, 0L);
-    // LOCAL but not STANDBY.
-    demotionListener.onStateChange(haGroupName, HAGroupState.ACTIVE_IN_SYNC,
-      HAGroupState.ACTIVE_NOT_IN_SYNC, 0L, ClusterType.LOCAL, 0L);
-
-    sleep(100);
-    assertFalse("Group must stay open for PEER/non-STANDBY events", logGroup.isClosed());
-  }
-
-  /**
-   * close() must unsubscribe every LOCAL listener registered during init() — the group's own
-   * demotion listener and the forwarder's two mode listeners — so a group closed on demotion does
-   * not leak listeners holding a reference to the dead group.
+   * close() must unsubscribe every LOCAL state listener registered during init() —
+   * ACTIVE_IN_SYNC_TO_STANDBY / STANDBY / DEGRADED_STANDBY (demotion), ACTIVE_IN_SYNC (abort resume
+   * + SYNC mode flip), and ACTIVE_NOT_IN_SYNC (mode flip) — so a group closed on demotion leaks no
+   * listeners holding a reference to the dead group.
    */
   @Test
   public void testCloseUnsubscribesListeners() throws Exception {
     logGroup.close();
 
+    verify(haGroupStoreManager).unsubscribeFromTargetState(eq(haGroupName),
+      eq(HAGroupState.ACTIVE_IN_SYNC_TO_STANDBY), eq(ClusterType.LOCAL),
+      any(HAGroupStateListener.class));
     verify(haGroupStoreManager).unsubscribeFromTargetState(eq(haGroupName),
       eq(HAGroupState.STANDBY), eq(ClusterType.LOCAL), any(HAGroupStateListener.class));
     verify(haGroupStoreManager).unsubscribeFromTargetState(eq(haGroupName),
