@@ -395,44 +395,33 @@ public class ReplicationLogGroup {
   protected LogEventHandler eventHandler;
 
   /**
-   * Get or create a ReplicationLogGroup instance for the given HA Group.
+   * Get or create a ReplicationLogGroup instance for the given HA Group. Returns empty when this
+   * cluster is not active for the HA group (see {@link #getOrCreate}).
    * @param conf        Configuration object
    * @param serverName  The server name
    * @param haGroupName The HA Group name
-   * @return ReplicationLogGroup instance
+   * @return ReplicationLogGroup instance, or empty if this cluster is not active
    * @throws IOException if initialization fails
    */
-  public static ReplicationLogGroup get(Configuration conf, ServerName serverName,
+  public static Optional<ReplicationLogGroup> get(Configuration conf, ServerName serverName,
     String haGroupName) throws IOException {
     return get(conf, serverName, haGroupName, (Abortable) null);
   }
 
   /**
-   * Get or create a ReplicationLogGroup instance for the given HA Group.
+   * Get or create a ReplicationLogGroup instance for the given HA Group. Returns empty when this
+   * cluster is not active for the HA group (see {@link #getOrCreate}).
    * @param conf        Configuration object
    * @param serverName  The server name
    * @param haGroupName The HA Group name
    * @param abortable   Abortable to invoke on fatal errors (typically RegionServerServices)
-   * @return ReplicationLogGroup instance
+   * @return ReplicationLogGroup instance, or empty if this cluster is not active
    * @throws IOException if initialization fails
    */
-  public static ReplicationLogGroup get(Configuration conf, ServerName serverName,
+  public static Optional<ReplicationLogGroup> get(Configuration conf, ServerName serverName,
     String haGroupName, Abortable abortable) throws IOException {
-    try {
-      return INSTANCES.computeIfAbsent(instanceKey(serverName, haGroupName), k -> {
-        try {
-          ReplicationLogGroup group = new ReplicationLogGroup(conf, serverName, haGroupName,
-            HAGroupStoreManager.getInstance(conf), abortable);
-          group.init();
-          return group;
-        } catch (IOException e) {
-          LOG.error("Failed to create ReplicationLogGroup for HA Group: {}", haGroupName, e);
-          throw new UncheckedIOException(e);
-        }
-      });
-    } catch (UncheckedIOException e) {
-      throw e.getCause();
-    }
+    return getOrCreate(conf, serverName, haGroupName, HAGroupStoreManager.getInstance(conf),
+      abortable);
   }
 
   /**
@@ -441,23 +430,65 @@ public class ReplicationLogGroup {
    * @param serverName          The server name
    * @param haGroupName         The HA Group name
    * @param haGroupStoreManager HA Group Store Manager instance
-   * @return ReplicationLogGroup instance
+   * @return ReplicationLogGroup instance, or empty if this cluster is not active
    * @throws IOException if initialization fails
    */
-  public static ReplicationLogGroup get(Configuration conf, ServerName serverName,
+  public static Optional<ReplicationLogGroup> get(Configuration conf, ServerName serverName,
     String haGroupName, HAGroupStoreManager haGroupStoreManager) throws IOException {
+    return getOrCreate(conf, serverName, haGroupName, haGroupStoreManager, null);
+  }
+
+  /**
+   * Get an existing, or create and initialize a new, ReplicationLogGroup — but only when this
+   * cluster is active for the HA group. A replication log group is a WRITER; it must exist only
+   * where this cluster is the active side. When the local role is not active this returns
+   * {@link Optional#empty()} and does NOT cache, so a later call re-checks the (now-active) role
+   * once this cluster is promoted.
+   */
+  private static Optional<ReplicationLogGroup> getOrCreate(Configuration conf,
+    ServerName serverName, String haGroupName, HAGroupStoreManager haGroupStoreManager,
+    Abortable abortable) throws IOException {
     try {
-      return INSTANCES.computeIfAbsent(instanceKey(serverName, haGroupName), k -> {
-        try {
-          ReplicationLogGroup group =
-            new ReplicationLogGroup(conf, serverName, haGroupName, haGroupStoreManager);
-          group.init();
-          return group;
-        } catch (IOException e) {
-          LOG.error("Failed to create ReplicationLogGroup for HA Group: {}", haGroupName, e);
-          throw new UncheckedIOException(e);
-        }
-      });
+      ReplicationLogGroup group =
+        INSTANCES.computeIfAbsent(instanceKey(serverName, haGroupName), k -> {
+          try {
+            // Role check BEFORE constructing any writer resource. Only mutations carrying
+            // HA_GROUP_NAME reach get() (the standby replay-apply path does not annotate that
+            // attribute), via either the live write path or preWALRestore recovery. On a non-active
+            // role we must not start a writer: on the live path it would be a stray/split-brain
+            // sync-path write, and on the replay path it is a demoted cluster replaying its own
+            // formerly-ACTIVE edits after a crash while the peer is now ACTIVE. Returning null
+            // keeps
+            // computeIfAbsent from caching, so the first call after this cluster is promoted
+            // re-runs
+            // the check against the now-active role. The mutation-blocked role (ACTIVE_TO_STANDBY,
+            // the ACTIVE_IN_SYNC_TO_STANDBY cutover gate) is active and deliberately allowed: it is
+            // reached from preWALRestore recovery on an RS restart during cutover, and the writer
+            // starts in SYNC with rotation suspended via failoverPending (see init()).
+            Optional<HAGroupStoreRecord> haRecord =
+              haGroupStoreManager.getEffectiveHAGroupStoreRecord(haGroupName);
+            if (!haRecord.isPresent()) {
+              throw new UncheckedIOException(new IOException(
+                String.format("HAGroup %s got an empty group store record", haGroupName)));
+            }
+            ClusterRoleRecord.ClusterRole role = haRecord.get().getClusterRole();
+            if (!role.isActive()) {
+              LOG.info(
+                "Not creating a ReplicationLogGroup for HA Group {}: local role {} is not active"
+                  + " (state {})",
+                haGroupName, role, haRecord.get().getHAGroupState());
+              return null;
+            }
+            ReplicationLogGroup created = new ReplicationLogGroup(conf, serverName, haGroupName,
+              haGroupStoreManager, abortable);
+            created.init();
+            return created;
+          } catch (IOException e) {
+            LOG.error("Failed to create ReplicationLogGroup for HA Group: {}", haGroupName, e);
+            throw new UncheckedIOException(e);
+          }
+        });
+      return Optional.ofNullable(group);
     } catch (UncheckedIOException e) {
       throw e.getCause();
     }
@@ -520,29 +551,9 @@ public class ReplicationLogGroup {
       throw new IOException(message);
     }
     HAGroupStoreRecord record = haRecord.get();
-    // Fail fast unless this cluster is active before creating any writer resources. A replication
-    // log group is a WRITER; it must exist only where this cluster is the active side. Only
-    // mutations carrying HA_GROUP_NAME reach get()/init() through the live write path (the standby
-    // replay-apply path does not annotate that attribute), so on a non-active role this is a
-    // stray/split-brain sync-path write and must fail — rather than starting a writer whose
-    // status-update task fails forever and whose forwarder self-promotes to SYNC_AND_FORWARD.
-    // computeIfAbsent does not cache when the factory throws, so the first write after this cluster
-    // is promoted re-runs init() against the now-active role.
-    //
-    // The mutation-blocked role (ACTIVE_TO_STANDBY, i.e. the ACTIVE_IN_SYNC_TO_STANDBY cutover
-    // gate) is deliberately allowed: init() reaches it not from the (blocked) live write path but
-    // from preWALRestore recovery on an RS restart / region reassignment during cutover. Rejecting
-    // it would throw an IOException back through the coprocessor host and abort WAL replay,
-    // silently
-    // failing to re-ship already-committed edits to the peer. Instead we let the writer start (in
-    // SYNC, per initializeReplicationMode) with rotation already suspended via failoverPending, so
-    // recovery ships its edits without minting new files that would re-arm the standby deadlock.
-    ClusterRoleRecord.ClusterRole role = record.getClusterRole();
-    if (!role.isActive()) {
-      throw new IOException(String
-        .format("HAGroup %s cannot start a replication log writer: local role %s is not active"
-          + " (state %s)", this, role, record.getHAGroupState()));
-    }
+    // The role gate (this cluster must be active) is enforced in getOrCreate() before construction,
+    // so by the time init() runs the local role is known active (possibly the ACTIVE_TO_STANDBY
+    // cutover gate, which starts in SYNC with rotation suspended — see below).
     this.haGroupStoreRecord = record;
     this.localShardManager = createLocalShardManager();
     this.peerInitTimeoutMs = conf.getLong(REPLICATION_LOG_PEER_INIT_TIMEOUT_MS_KEY,

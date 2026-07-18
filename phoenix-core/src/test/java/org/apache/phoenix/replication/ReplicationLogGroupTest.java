@@ -25,7 +25,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -1239,9 +1238,9 @@ public class ReplicationLogGroupTest extends ReplicationLogBaseTest {
 
     // Get instances for the first HA group
     ReplicationLogGroup g1_1 =
-      ReplicationLogGroup.get(conf, serverName, haGroupId1, haGroupStoreManager);
+      ReplicationLogGroup.get(conf, serverName, haGroupId1, haGroupStoreManager).get();
     ReplicationLogGroup g1_2 =
-      ReplicationLogGroup.get(conf, serverName, haGroupId1, haGroupStoreManager);
+      ReplicationLogGroup.get(conf, serverName, haGroupId1, haGroupStoreManager).get();
 
     // Verify same instance is returned for same haGroupId
     assertNotNull("ReplicationLogGroup should not be null", g1_1);
@@ -1251,16 +1250,16 @@ public class ReplicationLogGroupTest extends ReplicationLogBaseTest {
 
     // Get instance for a different HA group
     ReplicationLogGroup g2_1 =
-      ReplicationLogGroup.get(conf, serverName, haGroupId2, haGroupStoreManager);
+      ReplicationLogGroup.get(conf, serverName, haGroupId2, haGroupStoreManager).get();
     assertNotNull("ReplicationLogGroup should not be null", g2_1);
     assertTrue("Different instance should be returned for different haGroupId", g2_1 != g1_1);
     assertEquals("HA Group name should match", haGroupId2, g2_1.getHAGroupName());
 
     // Verify multiple calls still return cached instances
     ReplicationLogGroup g1_3 =
-      ReplicationLogGroup.get(conf, serverName, haGroupId1, haGroupStoreManager);
+      ReplicationLogGroup.get(conf, serverName, haGroupId1, haGroupStoreManager).get();
     ReplicationLogGroup g2_2 =
-      ReplicationLogGroup.get(conf, serverName, haGroupId2, haGroupStoreManager);
+      ReplicationLogGroup.get(conf, serverName, haGroupId2, haGroupStoreManager).get();
     assertTrue("Cached instance should be returned", g1_3 == g1_1);
     assertTrue("Cached instance should be returned", g2_2 == g2_1);
 
@@ -1279,13 +1278,13 @@ public class ReplicationLogGroupTest extends ReplicationLogBaseTest {
 
     // Get initial instance
     ReplicationLogGroup g1_1 =
-      ReplicationLogGroup.get(conf, serverName, haGroupId, haGroupStoreManager);
+      ReplicationLogGroup.get(conf, serverName, haGroupId, haGroupStoreManager).get();
     assertNotNull("ReplicationLogGroup should not be null", g1_1);
     assertFalse("Group should not be closed initially", g1_1.isClosed());
 
     // Verify cached instance is returned
     ReplicationLogGroup g1_2 =
-      ReplicationLogGroup.get(conf, serverName, haGroupId, haGroupStoreManager);
+      ReplicationLogGroup.get(conf, serverName, haGroupId, haGroupStoreManager).get();
     assertTrue("Same instance should be returned before close", g1_2 == g1_1);
 
     // Close the group
@@ -1294,7 +1293,7 @@ public class ReplicationLogGroupTest extends ReplicationLogBaseTest {
 
     // Get instance after close - should be a new instance
     ReplicationLogGroup g1_3 =
-      ReplicationLogGroup.get(conf, serverName, haGroupId, haGroupStoreManager);
+      ReplicationLogGroup.get(conf, serverName, haGroupId, haGroupStoreManager).get();
     assertNotNull("ReplicationLogGroup should not be null after close", g1_3);
     assertFalse("New group should not be closed", g1_3.isClosed());
     assertTrue("New instance should be created after close", g1_1 != g1_3);
@@ -2397,13 +2396,13 @@ public class ReplicationLogGroupTest extends ReplicationLogBaseTest {
 
   /**
    * A replication log group is a writer and must exist only where the local cluster is active.
-   * init() must fail fast on a non-active role (here STANDBY) before creating any writer resource —
-   * no local shard manager, no forwarder, no demotion subscription.
+   * get() must return empty (and not cache) on a non-active role (here STANDBY), before any writer
+   * resource is constructed — no group instance, no forwarder, no demotion subscription.
    */
   @Test
-  public void testInitFailsFastOnStandby() throws Exception {
+  public void testGetReturnsEmptyOnStandby() throws Exception {
     // Use a fresh HA group + its own mock manager so the never() verifications observe only this
-    // init() attempt, independent of the active logGroup created by setUpBase().
+    // get() attempt, independent of the active logGroup created by setUpBase().
     final String standbyGroup = haGroupName + "-standby";
     HAGroupStoreManager standbyManager = Mockito.mock(HAGroupStoreManager.class);
     HAGroupStoreRecord standbyRecord = new HAGroupStoreRecord(null, standbyGroup,
@@ -2412,22 +2411,14 @@ public class ReplicationLogGroupTest extends ReplicationLogBaseTest {
     doReturn(Optional.of(standbyRecord)).when(standbyManager)
       .getEffectiveHAGroupStoreRecord(anyString());
 
-    ReplicationLogGroup group = spy(
-      new TestableLogGroup(conf, serverName, standbyGroup, standbyManager, useAlignedRotation()));
-    try {
-      group.init();
-      fail("init() should fail fast on a non-active (STANDBY) role");
-    } catch (IOException e) {
-      assertTrue("Message should explain the role is not active: " + e.getMessage(),
-        e.getMessage().contains("is not active"));
-    }
+    Optional<ReplicationLogGroup> group =
+      ReplicationLogGroup.get(conf, serverName, standbyGroup, standbyManager);
+    assertFalse("get() must return empty on a non-active (STANDBY) role", group.isPresent());
 
-    // No writer resources should have been created.
-    verify(group, never()).createLocalShardManager();
-    assertNull("Forwarder must not be created on a standby", group.getLogForwarder());
-    // The demotion subscription is registered only after the role gate passes.
+    // No writer resources should have been created: the role gate runs before construction, so no
+    // group exists to subscribe any state listener.
     verify(standbyManager, never()).subscribeToTargetState(eq(standbyGroup),
-      eq(HAGroupState.STANDBY), eq(ClusterType.LOCAL), any(HAGroupStateListener.class));
+      any(HAGroupState.class), eq(ClusterType.LOCAL), any(HAGroupStateListener.class));
   }
 
   /**

@@ -26,9 +26,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
-import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -1258,14 +1256,10 @@ public class ReplicationLogGroupIT extends ReplicationLogGroupBaseIT {
     }
     assertTrue("Writer must be closed after demotion to STANDBY", logGroup.isClosed());
 
-    // The role gate must now reject re-creating a writer on the demoted (STANDBY) cluster.
-    try {
-      ReplicationLogGroup.get(conf1, sn, haGroupName);
-      fail("get() should fail fast on a STANDBY cluster");
-    } catch (IOException e) {
-      assertTrue("Message should explain the role is not active: " + e.getMessage(),
-        e.getMessage().contains("is not active"));
-    }
+    // The role gate must now refuse to re-create a writer on the demoted (STANDBY) cluster: get()
+    // returns empty rather than caching a writer for a non-active role.
+    assertFalse("get() should return empty on a STANDBY cluster",
+      ReplicationLogGroup.get(conf1, sn, haGroupName).isPresent());
   }
 
   /**
