@@ -480,7 +480,7 @@ public class ReplicationLogGroup {
               return null;
             }
             ReplicationLogGroup created = new ReplicationLogGroup(conf, serverName, haGroupName,
-              haGroupStoreManager, abortable);
+              haGroupStoreManager, abortable, haRecord.get());
             created.init();
             return created;
           } catch (IOException e) {
@@ -516,6 +516,22 @@ public class ReplicationLogGroup {
    */
   protected ReplicationLogGroup(Configuration conf, ServerName serverName, String haGroupName,
     HAGroupStoreManager haGroupStoreManager, Abortable abortable) {
+    this(conf, serverName, haGroupName, haGroupStoreManager, abortable, null);
+  }
+
+  /**
+   * Protected constructor for ReplicationLogGroup.
+   * @param conf                Configuration object
+   * @param serverName          The server name
+   * @param haGroupName         The HA Group name
+   * @param haGroupStoreManager HA Group Store Manager instance
+   * @param abortable           Abortable to invoke on fatal errors (may be null)
+   * @param haGroupStoreRecord  the effective record already read by the caller (may be null); when
+   *                            provided, init() uses it instead of re-reading the record
+   */
+  protected ReplicationLogGroup(Configuration conf, ServerName serverName, String haGroupName,
+    HAGroupStoreManager haGroupStoreManager, Abortable abortable,
+    HAGroupStoreRecord haGroupStoreRecord) {
     // conf object from coprocessor is instance of
     // org.apache.hadoop.hbase.coprocessor.ReadOnlyConfiguration and we need to modify it when
     // we send rpc to namenode so copying it
@@ -530,6 +546,7 @@ public class ReplicationLogGroup {
     this.haGroupName = haGroupName;
     this.haGroupStoreManager = haGroupStoreManager;
     this.abortable = abortable;
+    this.haGroupStoreRecord = haGroupStoreRecord;
     this.shutdownTimeoutMs = clonedConf.getLong(REPLICATION_LOG_GROUP_SHUTDOWN_TIMEOUT_MS_KEY,
       DEFAULT_REPLICATION_LOG_GROUP_SHUTDOWN_TIMEOUT_MS);
     this.metrics = createMetricsSource();
@@ -542,19 +559,23 @@ public class ReplicationLogGroup {
    */
   protected void init() throws IOException {
     LOG.info("Initializing ReplicationLogGroup {}", haGroupName);
-    Optional<HAGroupStoreRecord> haRecord =
-      haGroupStoreManager.getEffectiveHAGroupStoreRecord(haGroupName);
-    if (!haRecord.isPresent()) {
-      String message =
-        String.format("HAGroup %s got an empty group store record while initializing mode", this);
-      LOG.error(message);
-      throw new IOException(message);
+    // getOrCreate() reads the effective record for the role gate and seeds it via the constructor,
+    // so by the time init() runs the record is present and the local role is known active (possibly
+    // the ACTIVE_TO_STANDBY cutover gate, which starts in SYNC with rotation suspended — see
+    // below).
+    // The record may be null only when init() is invoked directly (tests); fall back to a read
+    // then.
+    if (haGroupStoreRecord == null) {
+      Optional<HAGroupStoreRecord> haRecord =
+        haGroupStoreManager.getEffectiveHAGroupStoreRecord(haGroupName);
+      if (!haRecord.isPresent()) {
+        String message =
+          String.format("HAGroup %s got an empty group store record while initializing mode", this);
+        LOG.error(message);
+        throw new IOException(message);
+      }
+      this.haGroupStoreRecord = haRecord.get();
     }
-    HAGroupStoreRecord record = haRecord.get();
-    // The role gate (this cluster must be active) is enforced in getOrCreate() before construction,
-    // so by the time init() runs the local role is known active (possibly the ACTIVE_TO_STANDBY
-    // cutover gate, which starts in SYNC with rotation suspended — see below).
-    this.haGroupStoreRecord = record;
     this.localShardManager = createLocalShardManager();
     this.peerInitTimeoutMs = conf.getLong(REPLICATION_LOG_PEER_INIT_TIMEOUT_MS_KEY,
       DEFAULT_REPLICATION_LOG_PEER_INIT_TIMEOUT_MS);
@@ -563,7 +584,7 @@ public class ReplicationLogGroup {
     this.logForwarder = new ReplicationLogDiscoveryForwarder(this);
     this.logForwarder.init();
     // Initialize the replication mode based on the HAGroupStore state
-    initializeReplicationMode(record);
+    initializeReplicationMode(haGroupStoreRecord);
     // Use the override value if provided in the config, else use a derived value
     this.syncTimeoutMs = conf.getLong(REPLICATION_LOG_SYNC_TIMEOUT_KEY, calculateSyncTimeout());
     // Initialize the disruptor so that we start processing events
@@ -576,7 +597,7 @@ public class ReplicationLogGroup {
     // is already ACTIVE_IN_SYNC_TO_STANDBY, the cutover listener won't fire — the state was read,
     // not transitioned into — so seed failoverPending here. This keeps rotation suspended from the
     // start so the fresh writer does not re-arm the standby's failover deadlock.
-    if (record.getHAGroupState().equals(HAGroupState.ACTIVE_IN_SYNC_TO_STANDBY)) {
+    if (haGroupStoreRecord.getHAGroupState().equals(HAGroupState.ACTIVE_IN_SYNC_TO_STANDBY)) {
       setFailoverPending(true);
     }
     LOG.info("HAGroup {} started with mode={}", this, mode);
